@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+vadimgest search - FTS5 + vector search over Obsidian vault, skills, and JSONL.
+
+Usage:
+    # FTS5 full-text search (default)
+    vadimgest search "query" --md               # Obsidian + skills
+    vadimgest search "query" --raw              # JSONL sources only
+    vadimgest search "query" -s telegram        # Specific JSONL source
+    vadimgest search "query" --md --raw         # Everything
+    vadimgest search "query" -n 20 --full       # More results, full content
+    vadimgest search "query" --json             # JSON output
+    vadimgest search "query" --raw --chat "X"   # Filter by chat
+    vadimgest search "query" --md --folder "People"  # Filter by folder
+
+    # Semantic search (embedding-based)
+    vadimgest search "query" --md --vec --provider gemini
+    vadimgest search "query" --raw --vec --provider ollama
+
+    # Hybrid search (FTS5 + embeddings + RRF fusion)
+    vadimgest search "query" --md --hybrid --provider gemini
+
+    # Index management
+    vadimgest search index                      # Build/update FTS5 index
+    vadimgest search index --rebuild            # Full rebuild
+    vadimgest search stats                      # Index statistics
+
+    # Embedding management
+    vadimgest search embed --provider gemini     # Generate embeddings
+    vadimgest search embed --provider ollama --limit 100  # First N docs
+    vadimgest search embed --stats              # Embedding coverage
+"""
+
+import json
+import sys
+import time
+from pathlib import Path
+
+from .indexer import DEFAULT_DB, DEFAULT_VAULT, DEFAULT_JSONL_DIR, index, stats, reindex_stale
+from .searcher import search, search_semantic, search_hybrid
+
+
+def _ensure_index(db_path: Path):
+    """Auto-index if database doesn't exist, and reindex stale JSONL sources."""
+    if not db_path.exists():
+        print("First run - building index...", file=sys.stderr, flush=True)
+        t0 = time.time()
+        result = index(db_path=db_path)
+        dt = time.time() - t0
+        total = sum(r.get("added", 0) + r.get("total", 0) for r in result.values())
+        print(f"Indexed {total} docs ({dt:.1f}s)", file=sys.stderr)
+    else:
+        stale = reindex_stale(db_path=db_path)
+        if stale:
+            added = sum(r.get("added", 0) for r in stale.values())
+            sources = ", ".join(f"{s}(+{r['added']})" for s, r in stale.items())
+            print(f"Auto-indexed {added} new: {sources}", file=sys.stderr)
+
+
+def _print_results(results, as_json: bool = False):
+    """Format and print search results."""
+    if not results:
+        print("No results.")
+        return
+
+    if as_json:
+        out = [{"path": r.path, "source": r.source, "title": r.title,
+                "snippet": r.snippet, "rank": r.rank,
+                "chat": r.chat, "folder": r.folder}
+               for r in results]
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+
+    for i, r in enumerate(results, 1):
+        src_tag = f"\033[36m[{r.source}]\033[0m "
+        chat_tag = f"\033[35m{r.chat}\033[0m " if r.chat else ""
+        print(f"\033[1m{i}. {src_tag}{chat_tag}{r.title}\033[0m")
+        display_path = r.path.split(":", 1)[1] if ":" in r.path else r.path
+        print(f"   {display_path}")
+        if r.snippet:
+            snippet = r.snippet.replace(">>>", "\033[33m").replace("<<<", "\033[0m")
+            for line in snippet.split("\n")[:3]:
+                line = line.strip()
+                if line:
+                    print(f"   {line}")
+        print()
+
+
+def cmd_search(query: str, n: int = 10, source: str | None = None,
+               md: bool = False, raw: bool = False, full: bool = False,
+               as_json: bool = False, chat: str | None = None,
+               folder: str | None = None, db_path: Path = DEFAULT_DB):
+    _ensure_index(db_path)
+    results = search(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+                     full=full, chat=chat, folder=folder)
+    _print_results(results, as_json)
+
+
+def cmd_search_vec(query: str, n: int = 10, source: str | None = None,
+                   md: bool = False, raw: bool = False, full: bool = False,
+                   as_json: bool = False, provider: str = "gemini",
+                   chat: str | None = None, folder: str | None = None,
+                   db_path: Path = DEFAULT_DB):
+    _ensure_index(db_path)
+    results = search_semantic(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+                              full=full, provider=provider, chat=chat, folder=folder)
+    _print_results(results, as_json)
+
+
+def cmd_search_hybrid(query: str, n: int = 10, source: str | None = None,
+                      md: bool = False, raw: bool = False, full: bool = False,
+                      as_json: bool = False, provider: str = "gemini",
+                      chat: str | None = None, folder: str | None = None,
+                      db_path: Path = DEFAULT_DB):
+    _ensure_index(db_path)
+    results = search_hybrid(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+                            full=full, provider=provider, chat=chat, folder=folder)
+    _print_results(results, as_json)
+
+
+def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
+              vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
+              db_path: Path = DEFAULT_DB):
+    print(f"Indexing...")
+    if exclude:
+        print(f"  Excluding: {', '.join(sorted(exclude))}")
+    t0 = time.time()
+    results = index(vault=vault, jsonl_dir=jsonl_dir, db_path=db_path,
+                    rebuild=rebuild, exclude=exclude)
+    dt = time.time() - t0
+
+    print(f"Done in {dt:.1f}s:")
+    total_added = 0
+    for source, r in sorted(results.items()):
+        added = r.get("added", 0)
+        total_added += added
+        total = r.get("total", 0)
+        extra = ""
+        if r.get("unchanged"):
+            extra = f"  unchanged={r['unchanged']}"
+        if r.get("updated"):
+            extra += f"  updated={r['updated']}"
+        if r.get("removed"):
+            extra += f"  removed={r['removed']}"
+        if r.get("skipped"):
+            extra = f"  skipped={r['skipped']}"
+        print(f"  {source:20} +{added:>6} / {total:>6} total{extra}")
+    print(f"  {'TOTAL':20} +{total_added:>6}")
+
+
+def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_DB):
+    from .indexer import index_embeddings
+    print(f"Embedding with {provider}...", file=sys.stderr, flush=True)
+    t0 = time.time()
+    result = index_embeddings(db_path=db_path, provider=provider, limit=limit)
+    dt = time.time() - t0
+    print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
+          f"skipped={result['skipped']}, total={result['total']}")
+
+
+def cmd_embed_stats(db_path: Path = DEFAULT_DB):
+    from .indexer import embed_stats
+    s = embed_stats(db_path)
+    print(f"Total docs: {s['total_docs']}")
+    print(f"Embedded:   {s['embedded']}")
+    print(f"Coverage:   {s['coverage']}%")
+
+
+def cmd_stats(db_path: Path = DEFAULT_DB):
+    s = stats(db_path)
+
+    if s["total"] == 0:
+        print("No index yet. Run: python3 -m vadimgest.search index")
+        return
+
+    mb = s["db_size"] / 1024 / 1024
+    print(f"Database: {db_path} ({mb:.1f} MB)")
+    print(f"Total indexed: {s['total']}")
+    print()
+    for source, count in sorted(s["sources"].items(), key=lambda x: -x[1]):
+        print(f"  {source:20} {count:>8}")
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+
+    # --- Commands ---
+
+    if args[0] == "index":
+        rebuild = "--rebuild" in args
+        exclude = set()
+        i = 1
+        while i < len(args):
+            if args[i] == "--exclude" and i + 1 < len(args):
+                exclude.add(args[i + 1])
+                i += 2
+            else:
+                i += 1
+        cmd_index(rebuild=rebuild, exclude=exclude or None)
+        return
+
+    if args[0] == "stats":
+        cmd_stats()
+        return
+
+    if args[0] == "embed":
+        provider = None
+        limit = None
+        show_stats = False
+        i = 1
+        while i < len(args):
+            if args[i] == "--provider" and i + 1 < len(args):
+                provider = args[i + 1]
+                i += 2
+            elif args[i] == "--limit" and i + 1 < len(args):
+                limit = int(args[i + 1])
+                i += 2
+            elif args[i] == "--stats":
+                show_stats = True
+                i += 1
+            else:
+                i += 1
+        if show_stats:
+            cmd_embed_stats()
+        elif not provider:
+            print("Error: --provider required. Use: --provider gemini|openai|ollama")
+            sys.exit(1)
+        else:
+            cmd_embed(provider=provider, limit=limit)
+        return
+
+    # --- Search mode ---
+    query = args[0]
+    n = 10
+    full = False
+    as_json = False
+    source = None
+    md = False
+    raw = False
+    chat = None
+    folder = None
+    vec = False
+    hybrid = False
+    provider = None
+
+    i = 1
+    while i < len(args):
+        if args[i] == "-n" and i + 1 < len(args):
+            n = int(args[i + 1])
+            i += 2
+        elif args[i] in ("-s", "--source") and i + 1 < len(args):
+            source = args[i + 1]
+            i += 2
+        elif args[i] == "--chat" and i + 1 < len(args):
+            chat = args[i + 1]
+            i += 2
+        elif args[i] == "--folder" and i + 1 < len(args):
+            folder = args[i + 1]
+            i += 2
+        elif args[i] == "--provider" and i + 1 < len(args):
+            provider = args[i + 1]
+            i += 2
+        elif args[i] == "--md":
+            md = True
+            i += 1
+        elif args[i] == "--raw":
+            raw = True
+            i += 1
+        elif args[i] == "--full":
+            full = True
+            i += 1
+        elif args[i] == "--json":
+            as_json = True
+            i += 1
+        elif args[i] == "--vec":
+            vec = True
+            i += 1
+        elif args[i] == "--hybrid":
+            hybrid = True
+            i += 1
+        else:
+            i += 1
+
+    if not md and not raw and not source:
+        print("Specify scope: --md (obsidian+skills), --raw (jsonl), -s SOURCE, or combine --md --raw")
+        sys.exit(1)
+
+    if (vec or hybrid) and not provider:
+        print("Error: --provider required with --vec/--hybrid. Use: --provider gemini|openai|ollama")
+        sys.exit(1)
+
+    if hybrid:
+        cmd_search_hybrid(query, n=n, source=source, md=md, raw=raw, full=full,
+                          as_json=as_json, provider=provider, chat=chat, folder=folder)
+    elif vec:
+        cmd_search_vec(query, n=n, source=source, md=md, raw=raw, full=full,
+                       as_json=as_json, provider=provider, chat=chat, folder=folder)
+    else:
+        cmd_search(query, n=n, source=source, md=md, raw=raw, full=full,
+                   as_json=as_json, chat=chat, folder=folder)
+
+
+if __name__ == "__main__":
+    main()

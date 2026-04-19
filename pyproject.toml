@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vadimgest"
+version = "0.2.0"
+description = "Personal data ETL - sync messages, meetings, notes into searchable JSONL"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Vadims Casecnikovs", email = "v@vadi.ms" },
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Archiving",
+    "Topic :: Communications :: Chat",
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "filelock>=3.0",
+]
+
+[project.optional-dependencies]
+telegram = ["telethon>=1.36"]
+dotenv = ["python-dotenv>=1.0"]
+search = [
+    "pysqlite3>=0.6.0",
+    "sqlite-vec>=0.1.6",
+    "httpx>=0.28",
+]
+web = ["flask>=3.0"]
+all = [
+    "telethon>=1.36",
+    "python-dotenv>=1.0",
+    "pysqlite3>=0.6.0",
+    "sqlite-vec>=0.1.6",
+    "httpx>=0.28",
+    "flask>=3.0",
+]
+
+[project.scripts]
+vadimgest = "vadimgest.cli:main"
+
+[project.urls]
+Repository = "https://github.com/VCasecnikovs/vadimgest"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vadimgest"]

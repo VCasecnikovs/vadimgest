@@ -1,0 +1,106 @@
+# vadimgest configuration
+# Copy to config.yaml (next to package) or ~/.config/vadimgest/config.yaml
+
+# Data directory (default: ./data/ or ~/.local/share/vadimgest/)
+# data_dir: ~/my-vadimgest-data
+
+# Search engine (optional)
+# search:
+#   qmd_dir: ~/path/to/qmd
+
+# --- Sources ---
+# Enable the ones you want to use.
+
+telegram:
+  enabled: false
+  mode: daemon
+  # api_id: ${TELEGRAM_API_ID}      # set in .env
+  # api_hash: ${TELEGRAM_API_HASH}  # set in .env
+  monitored_folders: []
+  include_contacts: true
+  auto_add_private: true
+
+signal:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Requires: sigtop CLI (brew install sigtop)
+
+granola:
+  enabled: false
+  mode: cron
+  schedule: "0 * * * *"
+  # macOS only - reads Granola app cache
+  # cache_path: ~/Library/Application Support/Granola/cache-v3.json
+
+dayflow:
+  enabled: false
+  mode: cron
+  schedule: "0 * * * *"
+  # macOS only - reads Dayflow app database
+  # db_path: ~/Library/Application Support/Dayflow/chunks.sqlite
+
+obsidian:
+  enabled: false
+  mode: cron
+  schedule: "0 * * * *"
+  # vault_path: ~/Documents/MyVault
+  skip_dirs: [.obsidian, .trash, .git, templates, Templates]
+  include_extensions: [.md, .markdown]
+
+claude:
+  enabled: false
+  mode: cron
+  schedule: "0 * * * *"
+  # projects_dir: ~/.claude/projects
+
+github:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Requires: mcp-cli (Claude Code)
+  projects: []
+  # projects:
+  #   - owner: my-org
+  #     owner_type: org
+  #     project_number: 1
+
+gmail:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Requires: mcp-cli with google MCP server
+  accounts: []
+  query: "newer_than:1d -in:spam -in:trash"
+  bootstrap_query: "newer_than:7d -in:spam -in:trash"
+  page_size: 25
+  batch_size: 25
+
+gtasks:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Requires: mcp-cli with google MCP server
+  # email: your@gmail.com
+  max_tasks: 100
+
+whatsapp:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Requires: mcp-cli with whatsapp MCP server
+  fetch_limit: 50
+  chat_limit: 50
+
+imessage:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # macOS only - requires Full Disk Access
+  # Compile: swiftc -O sources/imessage/export.swift -o sources/imessage/imessage-export
+
+# Conversation grouping (for messaging sources)
+conversation:
+  time_window_hours: 4
+  min_messages_per_chunk: 3
+  max_messages_per_chunk: 100

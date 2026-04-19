@@ -1,0 +1,18 @@
+__pycache__
+*.pyc
+*.egg-info
+.git
+.pytest_cache
+dist
+build
+
+# Secrets & user data — never bake these into an image
+.env
+.env.*
+!.env.example
+config.yaml
+config.local.yaml
+data/
+/data
+*.session
+.venv/

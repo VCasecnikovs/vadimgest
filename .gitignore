@@ -1,0 +1,38 @@
+# Data files (generated) - directory or symlink pointing at user data dir
+data/
+/data
+
+# User-specific config and secrets (sensitive)
+# Canonical location is ~/.vadimgest/ (home dotfolder, outside the repo tree).
+# These patterns cover legacy / accidental placements inside the repo.
+.env
+config.local.yaml
+config.yaml
+
+# Virtual environment
+.venv/
+
+# Compiled binaries
+sources/imessage/imessage-export
+vadimgest/ingest/sources/imessage/imessage-export
+
+# Telethon session files
+*.session
+*.session-journal
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# uv.lock is committed - see pyproject.toml for dep source of truth

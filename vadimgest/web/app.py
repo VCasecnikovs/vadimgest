@@ -6127,16 +6127,7 @@ async function runWizardSync() {
 
   if (toSync.length === 0) {
     log.innerHTML += '<div class="wiz-sync-line">Nothing to sync \u2014 no ready sources.</div>';
-    const autostartSection = document.getElementById('wiz-autostart-section');
-    if (autostartSection) {
-      autostartSection.style.display = 'block';
-      try {
-        const asRes = await fetch('/api/autostart');
-        const asData = await asRes.json();
-        const toggle = document.getElementById('wiz-autostart-toggle');
-        if (toggle) toggle.checked = asData.installed;
-      } catch(e) {}
-    }
+    await _wizEnsureAutostart();
     const doneBtn = document.getElementById('wiz-done-btn');
     if (doneBtn) { doneBtn.disabled = false; doneBtn.textContent = 'Finish'; }
     return;
@@ -6184,20 +6175,57 @@ async function runWizardSync() {
   log.innerHTML += '<div class="wiz-sync-line" style="margin-top:8px;font-weight:500">' + successCount + '/' + toSync.length + ' sources synced successfully</div>';
   log.scrollTop = log.scrollHeight;
 
-  // Show autostart toggle and check current state
-  const autostartSection = document.getElementById('wiz-autostart-section');
-  if (autostartSection) {
-    autostartSection.style.display = 'block';
-    try {
-      const asRes = await fetch('/api/autostart');
-      const asData = await asRes.json();
-      const toggle = document.getElementById('wiz-autostart-toggle');
-      if (toggle) toggle.checked = asData.installed;
-    } catch(e) {}
-  }
+  // Show autostart toggle. Enabled-by-default: auto-install on first
+  // reveal so the daemons come up after reboot without the user having
+  // to flip anything. User can still turn it off via the toggle.
+  await _wizEnsureAutostart();
 
   const doneBtn = document.getElementById('wiz-done-btn');
   if (doneBtn) { doneBtn.disabled = false; doneBtn.textContent = 'Go to Dashboard \u2192'; }
+}
+
+async function _wizEnsureAutostart() {
+  const autostartSection = document.getElementById('wiz-autostart-section');
+  if (!autostartSection) return;
+  autostartSection.style.display = 'block';
+  const toggle = document.getElementById('wiz-autostart-toggle');
+  const statusEl = document.getElementById('wiz-autostart-status');
+  try {
+    const asRes = await fetch('/api/autostart');
+    const asData = await asRes.json();
+    if (asData.installed) {
+      if (toggle) toggle.checked = true;
+      return;
+    }
+    // Not installed yet \u2014 install by default. User can toggle off after.
+    if (statusEl) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = 'Enabling start on boot\u2026';
+    }
+    const inst = await fetch('/api/autostart', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({port: 8484, interval: 300}),
+    });
+    const instData = await inst.json();
+    if (instData.ok) {
+      if (toggle) toggle.checked = true;
+      if (statusEl) {
+        statusEl.textContent = '\u2713 Start on boot is on. Toggle off if you don\'t want it.';
+      }
+    } else {
+      if (toggle) toggle.checked = false;
+      if (statusEl) {
+        statusEl.textContent = 'Could not enable automatically: ' + (instData.error || 'unknown');
+      }
+    }
+  } catch(e) {
+    if (toggle) toggle.checked = false;
+    if (statusEl) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = 'Autostart check failed: ' + e.message;
+    }
+  }
 }
 
 async function wizToggleAutostart(enable) {

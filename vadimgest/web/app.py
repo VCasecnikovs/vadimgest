@@ -6211,7 +6211,7 @@ async function _wizEnsureAutostart() {
     if (instData.ok) {
       if (toggle) toggle.checked = true;
       if (statusEl) {
-        statusEl.textContent = '\u2713 Start on boot is on. Toggle off if you don\'t want it.';
+        statusEl.textContent = '\u2713 Start on boot is on. Toggle off if you don\\'t want it.';
       }
     } else {
       if (toggle) toggle.checked = false;

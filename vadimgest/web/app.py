@@ -5752,13 +5752,25 @@ function _authModalRender(snap, method) {
   }
 
   if (snap.done) {
-    if (snap.exit_code === 0 || snap.summary) {
+    // Some CLIs (gog, notably) close their pty before waitpid settles,
+    // leaving exit_code=null even on success. Trust the summary parser
+    // first. Second-best: if any of the snap.lines look like a success
+    // marker (email/services/token issued), treat as success too.
+    var looksSuccess = snap.exit_code === 0 || !!snap.summary;
+    if (!looksSuccess && (snap.lines || []).length > 0) {
+      var last = (snap.lines || []).slice(-10).join('\\n');
+      if (/Authorization received|signed in|authenticated|Logged in|^email\\s/im.test(last)) {
+        looksSuccess = true;
+      }
+    }
+    if (looksSuccess) {
       status.className = 'auth-status success';
       status.textContent = snap.summary || 'Signed in \u2713';
       if (doneBtn) doneBtn.style.display = 'inline-block';
     } else {
       status.className = 'auth-status error';
-      status.textContent = 'Auth failed (exit ' + snap.exit_code + '). Check the log below.';
+      var exitDesc = snap.exit_code === null ? 'no exit code captured' : 'exit ' + snap.exit_code;
+      status.textContent = 'Auth failed (' + exitDesc + '). Check the log below.';
       if (doneBtn) doneBtn.style.display = 'inline-block';
     }
   } else if (snap.verification_url || snap.device_code || snap.qr_text) {

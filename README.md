@@ -4,6 +4,10 @@ Your digital life in one place. Syncs messages, emails, meetings, notes, browsin
 
 No cloud. No subscriptions. Everything stays on your machine.
 
+![Dashboard](docs/images/dashboard.png)
+
+> Works standalone or as the data layer for [Klava](https://github.com/VCasecnikovs/klava) - a personal AI assistant built on Claude Code that reads vadimgest to keep itself aware of what's happening in your world. Blog post about the whole stack: [link](#todo-link-to-blog) _(ToDo)_.
+
 ## What it does
 
 vadimgest pulls data from the tools you already use and stores it locally as append-only JSONL files. A built-in search index lets you find anything across all sources instantly.
@@ -43,6 +47,8 @@ vadimgest search "query" --md --raw  # search everything
 ## Dashboard
 
 The web dashboard gives you a full overview of your data and lets you manage sources without touching config files.
+
+![Dashboard source grid](docs/images/dashboard.png)
 
 - **Source grid** with live status, record counts, and last sync times
 - **Setup wizard** - guided onboarding that installs dependencies and handles auth

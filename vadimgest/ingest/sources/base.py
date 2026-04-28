@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -157,7 +157,7 @@ class BaseSyncer(ABC):
         """Log a sync run to sync_runs.jsonl."""
         runs_file = self.store.base_path / "sync_runs.jsonl"
         run = {
-            "ts": datetime.now().isoformat(),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "source": self.source_name,
             "status": status,
             "count": count,

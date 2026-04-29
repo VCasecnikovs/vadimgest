@@ -15,7 +15,8 @@ from .models import Record, SourceState, ConsumerCheckpoint
 def _normalize_ts(ts) -> str:
     """Normalize a timestamp value to a lexicographically-comparable ISO-like string.
 
-    Handles RFC 2822 ("Wed, 8 Apr 2026 20:10:08 -0700"), ISO ("2026-04-19T..."),
+    Handles RFC 2822 ("Wed, 8 Apr 2026 20:10:08 -0700"), Twitter's
+    ("Wed Apr 29 13:28:24 +0000 2026"), ISO ("2026-04-19T..."),
     "YYYY-MM-DD HH:MM" and numeric epoch values. Returns the original string if
     nothing parses so callers can still do a last-resort string compare.
     """
@@ -29,13 +30,20 @@ def _normalize_ts(ts) -> str:
     s = str(ts).strip()
     if not s:
         return ""
-    # RFC 2822 starts with a weekday name
+    # RFC 2822 starts with a weekday name + comma
     if re.match(r'^[A-Za-z]{3},', s):
         try:
             dt = parsedate_to_datetime(s)
             if dt is not None:
                 return dt.astimezone(timezone.utc).isoformat()
         except (TypeError, ValueError):
+            pass
+    # Twitter / asctime-with-tz: "Wed Apr 29 13:28:24 +0000 2026"
+    if re.match(r'^[A-Za-z]{3} [A-Za-z]{3} ', s):
+        try:
+            dt = datetime.strptime(s, "%a %b %d %H:%M:%S %z %Y")
+            return dt.astimezone(timezone.utc).isoformat()
+        except ValueError:
             pass
     # ISO-ish — normalize space separator to T so all ISO values compare uniformly
     try:

@@ -155,6 +155,20 @@ class TestAppend:
         # Earlier RFC date must not overwrite the later one
         assert store.get_state("src").last_ts == "Sun, 19 Apr 2026 22:15:00 +0000"
 
+    def test_append_last_ts_advances_with_twitter_format(self, store):
+        # Regression: xnews ingests Twitter's "Wed Apr 29 13:28:24 +0000 2026"
+        # format. Lex compare put "Wed Mar 25..." above any "Wed Apr/Feb/Jan..."
+        # because "M" > "A"/"F"/"J", so last_ts stuck on Mar 25 even after
+        # newer Apr tweets arrived. (2026-04-29)
+        store.append("src", {"id": "1", "ts": "Wed Mar 25 23:59:26 +0000 2026"})
+        store.append("src", {"id": "2", "ts": "Wed Apr 29 13:28:24 +0000 2026"})
+        assert store.get_state("src").last_ts == "Wed Apr 29 13:28:24 +0000 2026"
+
+    def test_append_last_ts_does_not_regress_with_twitter_format(self, store):
+        store.append("src", {"id": "1", "ts": "Wed Apr 29 13:28:24 +0000 2026"})
+        store.append("src", {"id": "2", "ts": "Wed Mar 25 23:59:26 +0000 2026"})
+        assert store.get_state("src").last_ts == "Wed Apr 29 13:28:24 +0000 2026"
+
     def test_append_no_id_field(self, store):
         rec = store.append("src", {"text": "no id"})
         assert rec._line == 1

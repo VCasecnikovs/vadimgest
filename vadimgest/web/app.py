@@ -1994,12 +1994,18 @@ body {
 }
 .toggle input {
   opacity: 0;
-  width: 0; height: 0;
+  width: 100%;
+  height: 100%;
   position: absolute;
+  inset: 0;
+  margin: 0;
+  z-index: 2;
+  cursor: pointer;
 }
 .toggle-track {
   position: absolute;
   inset: 0;
+  pointer-events: none;
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -3180,7 +3186,7 @@ async function toggleDaemon() {
 }
 
 async function refresh() {
-  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchSearchHealth(), fetchEdgeStatus()]);
+  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchEdgeStatus()]);
   updateHeaderStats();
   const activeTab = document.querySelector('.tab.active');
   if (activeTab) {
@@ -3189,6 +3195,13 @@ async function refresh() {
     else if (target === 'sources') renderSourcesPage();
     else if (target === 'edge') renderEdgePage();
   }
+  fetchSearchHealth().then(() => {
+    const activeTab = document.querySelector('.tab.active');
+    if (!activeTab) return;
+    const target = activeTab.getAttribute('data-tab');
+    if (target === 'dashboard') renderDashboard();
+    else if (target === 'sources') renderSourcesPage();
+  });
 }
 
 function updateHeaderStats() {
@@ -3723,6 +3736,8 @@ async function edgeCreateToken() {
   const res = await fetch('/api/edge/tokens', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label})});
   const data = await res.json();
   if (!data.ok) { showToast(data.error || 'Token generation failed', 'error'); return; }
+  await fetchEdgeStatus();
+  renderEdgePage();
   document.getElementById('edge-new-token').innerHTML = '<div style="background:var(--green-bg);border:1px solid var(--green);border-radius:8px;padding:10px;margin-bottom:12px"><div style="font-size:12px;color:var(--text2);margin-bottom:4px">Copy this token now. It will not be shown again.</div><code style="word-break:break-all">' + escHtml(data.token) + '</code></div>';
   showToast('Token generated', 'success');
 }

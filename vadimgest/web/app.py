@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, Response
 
 from ..store import DataStore
+from ..edge import EdgeIngestError, ingest_edge_batch
 from ..config import (
     get_data_dir, get_source_config, load_config, _find_config_file,
     _SOURCE_DEFAULTS, save_source_config, ensure_config_file,
@@ -478,6 +479,23 @@ def create_app(store: DataStore | None = None) -> Flask:
         t = threading.Thread(target=_run, daemon=True)
         t.start()
         return jsonify({"ok": True, "message": f"Sync started for {source}"})
+
+    @app.route("/api/edge/events/batch", methods=["POST"])
+    def api_edge_events_batch():
+        """Receive a batch from a local edge-agent.
+
+        Edge agents run on machines that can see local-only sources such as
+        iMessage, browser state, Dayflow, or local files. The server keeps the
+        canonical append-only vadimgest store; this endpoint is the stable
+        boundary local collectors push through.
+        """
+        payload = request.get_json(silent=True)
+        try:
+            result = ingest_edge_batch(store, payload)
+        except EdgeIngestError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        status = 207 if result.errors else 200
+        return jsonify(result.to_dict()), status
 
     @app.route("/api/config", methods=["GET"])
     def api_config():

@@ -14,6 +14,7 @@ Data directory resolution:
 """
 
 import os
+import socket
 from functools import lru_cache
 from pathlib import Path
 
@@ -207,6 +208,24 @@ def get_all_source_configs() -> dict:
     return {name: get_source_config(name) for name in _SOURCE_DEFAULTS}
 
 
+def get_edge_config() -> dict:
+    """Get local edge-agent configuration merged with defaults."""
+    config = load_config()
+    edge = config.get("edge", {}) or {}
+    sources = edge.get("sources")
+    if sources is not None and not isinstance(sources, list):
+        sources = None
+    return {
+        "enabled": bool(edge.get("enabled", False)),
+        "server_url": str(edge.get("server_url") or "").rstrip("/"),
+        "device_id": str(edge.get("device_id") or socket.gethostname() or "edge-device"),
+        "interval_seconds": int(edge.get("interval_seconds") or 300),
+        "batch_size": int(edge.get("batch_size") or 100),
+        "sources": sources,
+        "token_configured": bool(os.environ.get("VADIMGEST_EDGE_TOKEN")),
+    }
+
+
 # ---- Structural defaults (NO personal data) ----
 
 _SOURCE_DEFAULTS = {
@@ -371,6 +390,36 @@ def save_source_config(name: str, updates: dict) -> Path:
     if name not in raw:
         raw[name] = {}
     raw[name].update(updates)
+
+    with open(config_file, "w") as f:
+        yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    load_config.cache_clear()
+    return config_file
+
+
+def save_edge_config(updates: dict) -> Path:
+    """Update edge-agent config in YAML file and clear cache."""
+    config_file = ensure_config_file()
+
+    allowed = {"enabled", "server_url", "device_id", "interval_seconds", "batch_size", "sources"}
+    clean = {k: v for k, v in updates.items() if k in allowed}
+    if "server_url" in clean:
+        clean["server_url"] = str(clean["server_url"] or "").rstrip("/")
+    if "device_id" in clean:
+        clean["device_id"] = str(clean["device_id"] or "").strip()
+    for key in ("interval_seconds", "batch_size"):
+        if key in clean:
+            clean[key] = int(clean[key])
+    if "sources" in clean and clean["sources"] is not None:
+        clean["sources"] = [str(s).strip() for s in clean["sources"] if str(s).strip()]
+
+    with open(config_file) as f:
+        raw = yaml.safe_load(f) or {}
+
+    if "edge" not in raw or not isinstance(raw["edge"], dict):
+        raw["edge"] = {}
+    raw["edge"].update(clean)
 
     with open(config_file, "w") as f:
         yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)

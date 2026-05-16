@@ -12,6 +12,8 @@ from pathlib import Path
 
 LAUNCHD_LABELS = ["com.vadimgest.dashboard", "com.vadimgest.daemon"]
 SYSTEMD_UNITS = ["vadimgest-dashboard", "vadimgest-daemon"]
+EDGE_LAUNCHD_LABEL = "com.vadimgest.edge-agent"
+EDGE_SYSTEMD_UNIT = "vadimgest-edge-agent"
 
 
 def is_installed() -> bool:
@@ -21,6 +23,14 @@ def is_installed() -> bool:
     elif sys.platform == "linux":
         units = Path.home() / ".config" / "systemd" / "user"
         return all((units / f"{name}.service").exists() for name in SYSTEMD_UNITS)
+    return False
+
+
+def is_edge_installed() -> bool:
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "LaunchAgents" / f"{EDGE_LAUNCHD_LABEL}.plist").exists()
+    elif sys.platform == "linux":
+        return (Path.home() / ".config" / "systemd" / "user" / f"{EDGE_SYSTEMD_UNIT}.service").exists()
     return False
 
 
@@ -41,6 +51,25 @@ def uninstall(keep_running: bool = False):
         _uninstall_systemd(keep_running=keep_running)
     else:
         raise RuntimeError(f"Autostart not supported on {sys.platform}")
+
+
+def install_edge(interval: int = 300):
+    python = sys.executable
+    if sys.platform == "darwin":
+        _install_edge_launchd(python, interval)
+    elif sys.platform == "linux":
+        _install_edge_systemd(python, interval)
+    else:
+        raise RuntimeError(f"Edge autostart not supported on {sys.platform}")
+
+
+def uninstall_edge():
+    if sys.platform == "darwin":
+        _uninstall_edge_launchd()
+    elif sys.platform == "linux":
+        _uninstall_edge_systemd()
+    else:
+        raise RuntimeError(f"Edge autostart not supported on {sys.platform}")
 
 
 def _build_path() -> str:
@@ -128,6 +157,55 @@ def _uninstall_launchd(keep_running: bool = False):
             plist_path.unlink()
 
 
+def _install_edge_launchd(python: str, interval: int):
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    plist_path = agents_dir / f"{EDGE_LAUNCHD_LABEL}.plist"
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+
+    path_value = _build_path()
+    args = [python, "-m", "vadimgest", "edge-agent"]
+    args_xml = "\n".join(f"        <string>{a}</string>" for a in args)
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{EDGE_LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path_value}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>{max(1, int(interval))}</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/vadimgest-edge-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vadimgest-edge-agent.log</string>
+</dict>
+</plist>
+"""
+    plist_path.write_text(plist)
+    subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
+
+
+def _uninstall_edge_launchd():
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{EDGE_LAUNCHD_LABEL}.plist"
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+        plist_path.unlink()
+
+
 def _install_systemd(python: str, port: int, interval: int):
     unit_dir = Path.home() / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
@@ -175,3 +253,32 @@ def _uninstall_systemd(keep_running: bool = False):
         unit_path = unit_dir / f"{name}.service"
         if unit_path.exists():
             unit_path.unlink()
+
+
+def _install_edge_systemd(python: str, interval: int):
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    unit_path = unit_dir / f"{EDGE_SYSTEMD_UNIT}.service"
+    unit = f"""[Unit]
+Description=vadimgest edge agent
+After=network.target
+
+[Service]
+ExecStart={python} -m vadimgest edge-agent
+Restart=always
+RestartSec={max(1, int(interval))}
+
+[Install]
+WantedBy=default.target
+"""
+    unit_path.write_text(unit)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", EDGE_SYSTEMD_UNIT], capture_output=True)
+
+
+def _uninstall_edge_systemd():
+    subprocess.run(["systemctl", "--user", "disable", "--now", EDGE_SYSTEMD_UNIT], capture_output=True)
+    unit_path = Path.home() / ".config" / "systemd" / "user" / f"{EDGE_SYSTEMD_UNIT}.service"
+    if unit_path.exists():
+        unit_path.unlink()
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)

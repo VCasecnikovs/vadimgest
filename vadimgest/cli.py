@@ -14,6 +14,7 @@ Usage:
     vadimgest config                  # Show effective config
     vadimgest serve                   # Launch web dashboard on :8484
     vadimgest daemon                  # Run background sync scheduler
+    vadimgest edge-agent --once       # Push local records to a server
 """
 
 import argparse
@@ -988,6 +989,10 @@ def main():
     daemon_parser.add_argument("--interval", "-i", type=int, default=300, help="Sync interval in seconds (default: 300)")
     daemon_parser.add_argument("--sources", "-s", help="Sources to sync (comma-separated, default: all enabled)")
 
+    # edge-agent command
+    edge_parser = subparsers.add_parser("edge-agent", help="Run local edge uploader")
+    edge_parser.add_argument("--once", action="store_true", help="Run one sync/upload cycle and exit")
+
     # autostart command
     autostart_parser = subparsers.add_parser("autostart", help="Install/remove autostart services (launchd/systemd)")
     autostart_parser.add_argument("--disable", action="store_true", help="Remove autostart services")
@@ -1081,6 +1086,10 @@ def main():
         from .daemon import run_daemon
         sources = args.sources.split(",") if args.sources else None
         run_daemon(interval=args.interval, sources=sources)
+
+    elif args.command == "edge-agent":
+        from .edge_agent import run_edge_agent
+        run_edge_agent(once=args.once)
 
 
 if __name__ == "__main__":

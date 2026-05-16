@@ -13,13 +13,22 @@ from pathlib import Path
 from flask import Flask, jsonify, request, Response
 
 from ..store import DataStore
-from ..edge import EdgeIngestError, ingest_edge_batch
+from ..edge import (
+    EdgeAuthError,
+    EdgeIngestError,
+    create_edge_token,
+    ingest_edge_batch,
+    list_edge_tokens,
+    revoke_edge_token,
+    verify_edge_token,
+)
 from ..config import (
     get_data_dir, get_source_config, load_config, _find_config_file,
     _SOURCE_DEFAULTS, save_source_config, ensure_config_file,
     save_env_vars, get_env_status, get_env_file_path,
-    get_search_config, save_search_config,
+    get_search_config, save_search_config, get_edge_config, save_edge_config,
 )
+from ..edge_agent import EdgeAgent, _default_transport
 from ..ingest.sources import get_syncer_class, get_load_error, all_source_names
 from ..daemon import SyncDaemon
 from .setup import (
@@ -489,6 +498,15 @@ def create_app(store: DataStore | None = None) -> Flask:
         canonical append-only vadimgest store; this endpoint is the stable
         boundary local collectors push through.
         """
+        auth = request.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not auth.startswith(prefix):
+            return jsonify({"ok": False, "error": "edge bearer token required"}), 401
+        try:
+            verify_edge_token(auth[len(prefix):], store.base_path)
+        except EdgeAuthError as e:
+            return jsonify({"ok": False, "error": str(e)}), 401
+
         payload = request.get_json(silent=True)
         try:
             result = ingest_edge_batch(store, payload)
@@ -496,6 +514,93 @@ def create_app(store: DataStore | None = None) -> Flask:
             return jsonify({"ok": False, "error": str(e)}), 400
         status = 207 if result.errors else 200
         return jsonify(result.to_dict()), status
+
+    @app.route("/api/edge/tokens", methods=["GET", "POST"])
+    def api_edge_tokens():
+        if request.method == "GET":
+            return jsonify({"tokens": list_edge_tokens(store.base_path)})
+        data = request.json or {}
+        issued = create_edge_token(data.get("label", ""), store.base_path)
+        return jsonify({"ok": True, "token": issued.token, "metadata": issued.metadata})
+
+    @app.route("/api/edge/tokens/<token_id>", methods=["DELETE"])
+    def api_edge_token_delete(token_id):
+        if not revoke_edge_token(token_id, store.base_path):
+            return jsonify({"ok": False, "error": "token not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.route("/api/edge/status", methods=["GET"])
+    def api_edge_status():
+        return jsonify({
+            "ok": True,
+            "ingest_url": request.host_url.rstrip("/") + "/api/edge/events/batch",
+            "tokens": list_edge_tokens(store.base_path),
+            "config": get_edge_config(),
+            "stats": store.stats(),
+        })
+
+    @app.route("/api/edge/config", methods=["GET", "PUT"])
+    def api_edge_config():
+        if request.method == "GET":
+            return jsonify(get_edge_config())
+        data = request.json or {}
+        updates = {k: data[k] for k in ("enabled", "server_url", "device_id", "interval_seconds", "batch_size", "sources") if k in data}
+        if updates:
+            save_edge_config(updates)
+        token = data.get("token")
+        if token:
+            save_env_vars({"VADIMGEST_EDGE_TOKEN": str(token).strip()})
+        return jsonify({"ok": True, "config": get_edge_config()})
+
+    @app.route("/api/edge/test", methods=["POST"])
+    def api_edge_test():
+        data = request.json or {}
+        cfg = get_edge_config()
+        server_url = str(data.get("server_url") or cfg.get("server_url") or "").rstrip("/")
+        token = str(data.get("token") or os.environ.get("VADIMGEST_EDGE_TOKEN") or "").strip()
+        if not server_url or not token:
+            return jsonify({"ok": False, "error": "server_url and token are required"}), 400
+        payload = {
+            "device_id": str(data.get("device_id") or cfg.get("device_id") or ""),
+            "source": "edge_test",
+            "events": [],
+        }
+        try:
+            status, body = _default_transport(server_url + "/api/edge/events/batch", token, payload, 15)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 502
+        if status not in (200, 207):
+            return jsonify({"ok": False, "status": status, "error": body.get("error") or "connection failed"}), 502
+        return jsonify({"ok": True, "status": status, "response": body})
+
+    @app.route("/api/edge/agent/run-once", methods=["POST"])
+    def api_edge_agent_run_once():
+        try:
+            result = EdgeAgent(store).run_once().to_dict()
+            return jsonify(result), (200 if result.get("ok") else 500)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+
+    @app.route("/api/edge/agent", methods=["GET"])
+    def api_edge_agent_status():
+        from .autostart import is_edge_installed
+        return jsonify({
+            "installed": is_edge_installed(),
+            "config": get_edge_config(),
+        })
+
+    @app.route("/api/edge/agent/install", methods=["POST", "DELETE"])
+    def api_edge_agent_install():
+        from .autostart import install_edge, uninstall_edge
+        try:
+            if request.method == "POST":
+                interval = int((request.json or {}).get("interval", get_edge_config().get("interval_seconds", 300)))
+                install_edge(interval=interval)
+            else:
+                uninstall_edge()
+            return jsonify({"ok": True})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
 
     @app.route("/api/config", methods=["GET"])
     def api_config():
@@ -2738,6 +2843,7 @@ body {
 <div class="tabs">
   <div class="tab active" data-tab="dashboard">Dashboard</div>
   <div class="tab" data-tab="sources">Sources</div>
+  <div class="tab" data-tab="edge">Edge Sync</div>
   <div class="tab" data-tab="docs">Docs</div>
 </div>
 
@@ -2745,6 +2851,7 @@ body {
   <div id="config-banner"></div>
   <div class="tab-content active" id="tab-dashboard"></div>
   <div class="tab-content" id="tab-sources"></div>
+  <div class="tab-content" id="tab-edge"></div>
   <div class="tab-content" id="tab-docs"></div>
 </div>
 
@@ -2778,6 +2885,7 @@ let queuesData = null;
 let consumersData = null;
 let appConfig = {};
 let searchHealth = null;
+let edgeStatus = null;
 let openSourceName = null;
 
 const SOURCE_ICONS = {
@@ -2820,6 +2928,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.getElementById('tab-' + target).classList.add('active');
     if (target === 'dashboard') renderDashboard();
     if (target === 'sources') renderSourcesPage();
+    if (target === 'edge') renderEdgePage();
     if (target === 'docs') renderDocsPage();
   });
 });
@@ -3035,6 +3144,12 @@ async function fetchSearchHealth() {
   } catch(e) { searchHealth = null; }
 }
 
+async function fetchEdgeStatus() {
+  try {
+    edgeStatus = await apiFetch('/api/edge/status');
+  } catch(e) { edgeStatus = null; }
+}
+
 async function fetchDaemon() {
   try {
     const data = await apiFetch('/api/daemon');
@@ -3065,13 +3180,14 @@ async function toggleDaemon() {
 }
 
 async function refresh() {
-  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchSearchHealth()]);
+  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchSearchHealth(), fetchEdgeStatus()]);
   updateHeaderStats();
   const activeTab = document.querySelector('.tab.active');
   if (activeTab) {
     const target = activeTab.getAttribute('data-tab');
     if (target === 'dashboard') renderDashboard();
     else if (target === 'sources') renderSourcesPage();
+    else if (target === 'edge') renderEdgePage();
   }
 }
 
@@ -3519,6 +3635,150 @@ function renderSourcesPage() {
   el.innerHTML = html;
 }
 
+// ---- Edge Sync Page ----
+function renderEdgePage() {
+  const el = document.getElementById('tab-edge');
+  const st = edgeStatus || {};
+  const cfg = st.config || {};
+  const tokens = st.tokens || [];
+  const sourceSet = new Set(cfg.sources || []);
+  let html = '';
+
+  html += '<div class="panel">';
+  html += '<div class="panel-title">Server Tokens</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:12px">';
+  html += '<input id="edge-token-label" placeholder="Device label, e.g. Vadim MacBook" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px">';
+  html += '<button class="btn btn-primary" onclick="edgeCreateToken()">Generate Token</button>';
+  html += '</div>';
+  html += '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">Ingest URL: <code style="background:var(--bg3);padding:2px 6px;border-radius:4px">' + escHtml(st.ingest_url || '') + '</code></div>';
+  html += '<div id="edge-new-token"></div>';
+  if (tokens.length) {
+    html += '<table class="runs-table"><thead><tr><th>Label</th><th>Created</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>';
+    tokens.forEach(t => {
+      html += '<tr>';
+      html += '<td>' + escHtml(t.label || t.id) + '</td>';
+      html += '<td class="mono">' + escHtml(t.created_at || '') + '</td>';
+      html += '<td>' + timeAgo(t.last_seen_at) + '</td>';
+      html += '<td>' + (t.active ? '<span class="badge badge-green">active</span>' : '<span class="badge badge-gray">revoked</span>') + '</td>';
+      html += '<td>' + (t.active ? '<button class="btn btn-sm" onclick="edgeRevokeToken(\\'' + escHtml(t.id) + '\\')">Revoke</button>' : '') + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty"><p>No edge tokens yet.</p></div>';
+  }
+  html += '</div>';
+
+  html += '<div class="panel">';
+  html += '<div class="panel-title">Local Edge Agent</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">';
+  html += '<div class="field"><label>Server URL</label><input id="edge-server-url" value="' + escHtml(cfg.server_url || '') + '" placeholder="https://server.example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
+  html += '<div class="field"><label>Token</label><input id="edge-token" type="password" placeholder="' + (cfg.token_configured ? 'configured - leave blank to keep' : 'paste generated token') + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
+  html += '<div class="field"><label>Device ID</label><input id="edge-device-id" value="' + escHtml(cfg.device_id || '') + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+  html += '<div class="field"><label>Interval seconds</label><input id="edge-interval" type="number" min="1" value="' + escHtml(cfg.interval_seconds || 300) + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
+  html += '<div class="field"><label>Batch size</label><input id="edge-batch-size" type="number" min="1" max="1000" value="' + escHtml(cfg.batch_size || 100) + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
+  html += '</div></div>';
+  html += '<label class="toggle" style="margin:12px 0"><input type="checkbox" id="edge-enabled" ' + (cfg.enabled ? 'checked' : '') + '><span class="toggle-track"></span><span style="margin-left:8px">Edge agent enabled in config</span></label>';
+  html += '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">If no source is selected, the agent uploads all enabled local sources.</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">';
+  (sourcesData || []).forEach(s => {
+    const checked = sourceSet.has(s.name);
+    html += '<label style="display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">';
+    html += '<input type="checkbox" class="edge-source" value="' + escHtml(s.name) + '" ' + (checked ? 'checked' : '') + '>';
+    html += escHtml(s.name);
+    html += '</label>';
+  });
+  html += '</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
+  html += '<button class="btn btn-primary" onclick="edgeSaveConfig()">Save</button>';
+  html += '<button class="btn" onclick="edgeTestConnection()">Test Connection</button>';
+  html += '<button class="btn" onclick="edgeRunOnce()">Run Once</button>';
+  html += '<button class="btn" onclick="edgeInstallAgent()">Install/Start Agent</button>';
+  html += '<button class="btn" onclick="edgeUninstallAgent()">Stop/Uninstall</button>';
+  html += '</div>';
+  html += '<div id="edge-agent-output" style="margin-top:12px"></div>';
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
+function edgeConfigPayload() {
+  const selected = Array.from(document.querySelectorAll('.edge-source:checked')).map(i => i.value);
+  const payload = {
+    enabled: document.getElementById('edge-enabled').checked,
+    server_url: document.getElementById('edge-server-url').value.trim(),
+    device_id: document.getElementById('edge-device-id').value.trim(),
+    interval_seconds: parseInt(document.getElementById('edge-interval').value || '300', 10),
+    batch_size: parseInt(document.getElementById('edge-batch-size').value || '100', 10),
+    sources: selected.length ? selected : null
+  };
+  const token = document.getElementById('edge-token').value.trim();
+  if (token) payload.token = token;
+  return payload;
+}
+
+async function edgeCreateToken() {
+  const label = document.getElementById('edge-token-label').value.trim();
+  const res = await fetch('/api/edge/tokens', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label})});
+  const data = await res.json();
+  if (!data.ok) { showToast(data.error || 'Token generation failed', 'error'); return; }
+  document.getElementById('edge-new-token').innerHTML = '<div style="background:var(--green-bg);border:1px solid var(--green);border-radius:8px;padding:10px;margin-bottom:12px"><div style="font-size:12px;color:var(--text2);margin-bottom:4px">Copy this token now. It will not be shown again.</div><code style="word-break:break-all">' + escHtml(data.token) + '</code></div>';
+  showToast('Token generated', 'success');
+}
+
+async function edgeRevokeToken(id) {
+  const res = await fetch('/api/edge/tokens/' + encodeURIComponent(id), {method:'DELETE'});
+  const data = await res.json();
+  if (!data.ok) { showToast(data.error || 'Revoke failed', 'error'); return; }
+  showToast('Token revoked', 'success');
+  await fetchEdgeStatus();
+  renderEdgePage();
+}
+
+async function edgeSaveConfig() {
+  const res = await fetch('/api/edge/config', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(edgeConfigPayload())});
+  const data = await res.json();
+  if (!data.ok) { showToast(data.error || 'Save failed', 'error'); return; }
+  document.getElementById('edge-token').value = '';
+  showToast('Edge config saved', 'success');
+  await fetchEdgeStatus();
+  renderEdgePage();
+}
+
+async function edgeTestConnection() {
+  const out = document.getElementById('edge-agent-output');
+  out.innerHTML = '<div class="empty"><p>Testing connection...</p></div>';
+  const res = await fetch('/api/edge/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(edgeConfigPayload())});
+  const data = await res.json();
+  out.innerHTML = '<pre style="background:var(--bg3);padding:12px;border-radius:8px;white-space:pre-wrap">' + escHtml(JSON.stringify(data, null, 2)) + '</pre>';
+  showToast(data.ok ? 'Edge connection works' : 'Edge connection failed', data.ok ? 'success' : 'error');
+}
+
+async function edgeRunOnce() {
+  await edgeSaveConfig();
+  const out = document.getElementById('edge-agent-output');
+  out.innerHTML = '<div class="empty"><p>Running edge-agent once...</p></div>';
+  const res = await fetch('/api/edge/agent/run-once', {method:'POST'});
+  const data = await res.json();
+  out.innerHTML = '<pre style="background:var(--bg3);padding:12px;border-radius:8px;white-space:pre-wrap">' + escHtml(JSON.stringify(data, null, 2)) + '</pre>';
+  showToast(data.ok ? 'Edge run complete' : 'Edge run failed', data.ok ? 'success' : 'error');
+  await refresh();
+}
+
+async function edgeInstallAgent() {
+  await edgeSaveConfig();
+  const res = await fetch('/api/edge/agent/install', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({interval:parseInt(document.getElementById('edge-interval').value || '300', 10)})});
+  const data = await res.json();
+  showToast(data.ok ? 'Edge agent installed' : (data.error || 'Install failed'), data.ok ? 'success' : 'error');
+}
+
+async function edgeUninstallAgent() {
+  const res = await fetch('/api/edge/agent/install', {method:'DELETE'});
+  const data = await res.json();
+  showToast(data.ok ? 'Edge agent removed' : (data.error || 'Remove failed'), data.ok ? 'success' : 'error');
+}
+
 // ---- Docs Page (merged Docs + Agent) ----
 function renderDocsPage() {
   const el = document.getElementById('tab-docs');
@@ -3607,6 +3867,15 @@ function renderDocsPage() {
     ['GET', '/api/data/overview', 'Data overview with record counts and sizes'],
     ['GET', '/api/data/search', 'Full-text search across all data'],
     ['GET', '/api/data/browse', 'Browse records from a specific source'],
+    ['POST', '/api/edge/events/batch', 'Authenticated edge-agent batch ingest'],
+    ['GET', '/api/edge/status', 'Edge status, ingest URL, token metadata'],
+    ['GET/POST', '/api/edge/tokens', 'List or generate edge tokens'],
+    ['DELETE', '/api/edge/tokens/:id', 'Revoke an edge token'],
+    ['GET/PUT', '/api/edge/config', 'Read or save local edge-agent config'],
+    ['POST', '/api/edge/test', 'Test edge server URL and token'],
+    ['POST', '/api/edge/agent/run-once', 'Run one edge-agent upload cycle'],
+    ['GET', '/api/edge/agent', 'Local edge-agent service status'],
+    ['POST/DELETE', '/api/edge/agent/install', 'Install/start or stop/remove edge service'],
   ];
   endpoints.forEach(function(ep) {
     html += '<tr style="border-bottom:1px solid var(--border)">';

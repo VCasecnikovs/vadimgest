@@ -65,7 +65,8 @@ def main():
 
     # 2. Data directory created
     print("\n[2] Data directory")
-    data_dir = Path.home() / ".local/share/vadimgest"
+    from vadimgest.config import get_data_dir
+    data_dir = get_data_dir()
     check("data dir exists", data_dir.exists(), str(data_dir))
     check("sources dir exists", (data_dir / "sources").exists())
 

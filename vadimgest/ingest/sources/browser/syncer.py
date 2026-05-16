@@ -4,7 +4,7 @@ import hashlib
 import shutil
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import urlparse
@@ -293,7 +293,7 @@ class BrowserSyncer(CronSyncer):
         """Convert Chrome timestamp (microseconds since 1601-01-01) to datetime."""
         unix_ts = (chrome_ts / 1_000_000) - _CHROME_EPOCH_OFFSET
         try:
-            return datetime.fromtimestamp(unix_ts)
+            return datetime.fromtimestamp(unix_ts, tz=timezone.utc).replace(tzinfo=None)
         except (OSError, ValueError):
             return datetime(2020, 1, 1)
 

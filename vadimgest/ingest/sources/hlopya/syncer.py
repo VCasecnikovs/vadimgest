@@ -62,14 +62,24 @@ class HlopyaSyncer(CronSyncer):
             if not meta:
                 continue
 
-            # Only ingest completed sessions
-            if meta.get("status") != "done":
+            # Only ingest sessions that have finished producing readable text.
+            # Newer Hlopya builds mark transcript-only sessions as "transcribed";
+            # notes.json may be generated later or skipped entirely.
+            if not self._is_ingestable_session(meta, session_dir):
                 continue
 
             record = self._build_record(session_id, session_dir, meta)
             if record:
                 yield record
                 yielded += 1
+
+    def _is_ingestable_session(self, meta: dict, session_dir: Path) -> bool:
+        status = str(meta.get("status") or "").strip().lower()
+        if status == "done":
+            return True
+        if status == "transcribed":
+            return (session_dir / "transcript.json").exists() or (session_dir / "transcript.md").exists()
+        return False
 
     def _build_record(self, session_id: str, session_dir: Path, meta: dict) -> dict | None:
         notes = self._read_json(session_dir / "notes.json") or {}
@@ -125,7 +135,7 @@ class HlopyaSyncer(CronSyncer):
             "title": meta.get("title") or notes.get("title") or session_id,
             "created_at": created_at,
             "updated_at": created_at,
-            "duration_minutes": round(meta.get("duration", 0) / 60) if meta.get("duration") else 0,
+            "duration_minutes": self._duration_minutes(meta, transcript),
             "participants": meta.get("participants") or notes.get("participants") or [],
             "participant_names": meta.get("participant_names", {}),
             "notes": "\n\n".join(md_parts) if md_parts else "",
@@ -156,3 +166,24 @@ class HlopyaSyncer(CronSyncer):
             return path.read_text(encoding="utf-8").strip() or None
         except Exception:
             return None
+
+    def _duration_minutes(self, meta: dict, transcript: dict | None) -> int:
+        duration = meta.get("duration")
+        if not duration and transcript:
+            duration = transcript.get("duration_seconds")
+        if not duration and transcript:
+            duration = self._duration_from_segments(transcript)
+        try:
+            seconds = float(duration or 0)
+        except (TypeError, ValueError):
+            seconds = 0
+        return round(seconds / 60) if seconds else 0
+
+    def _duration_from_segments(self, transcript: dict) -> float:
+        ends = []
+        for segment in transcript.get("segments") or []:
+            try:
+                ends.append(float(segment.get("end") or 0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return max(ends) if ends else 0

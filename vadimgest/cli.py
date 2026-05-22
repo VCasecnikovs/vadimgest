@@ -21,7 +21,7 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .store import DataStore
@@ -137,7 +137,8 @@ def show_health(store: DataStore):
                 except Exception:
                     pass
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
+    now_naive = datetime.now()
     all_ok = True
 
     for source in all_source_names():
@@ -163,7 +164,11 @@ def show_health(store: DataStore):
             if runs:
                 last = runs[-1]
                 last_ts = datetime.fromisoformat(last["ts"])
-                age = now - last_ts
+                if last_ts.tzinfo is None:
+                    age = now_naive - last_ts
+                else:
+                    last_ts = last_ts.astimezone(timezone.utc)
+                    age = now - last_ts
 
                 if not ready.get("ok", True):
                     missing = ready.get("missing", [])

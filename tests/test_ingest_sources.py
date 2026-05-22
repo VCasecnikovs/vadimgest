@@ -50,6 +50,10 @@ def _ensure_telethon_mock():
         def __init__(self, document=None, **kwargs):
             self.document = document
 
+    class MessageMediaPhoto:
+        def __init__(self, photo=None, **kwargs):
+            self.photo = photo
+
     class DocumentAttributeAudio:
         def __init__(self, duration=0, voice=False, **kwargs):
             self.duration = duration
@@ -62,6 +66,7 @@ def _ensure_telethon_mock():
         pass
 
     tl_types.MessageMediaDocument = MessageMediaDocument
+    tl_types.MessageMediaPhoto = MessageMediaPhoto
     tl_types.DocumentAttributeAudio = DocumentAttributeAudio
     tl_types.DialogFilter = DialogFilter
     tl_types.DialogFilterDefault = DialogFilterDefault
@@ -104,6 +109,7 @@ XNewsSyncer = _xn_mod.XNewsSyncer
 # Get the mock types we created
 _tl_types = sys.modules["telethon.tl.types"]
 MessageMediaDocument = _tl_types.MessageMediaDocument
+MessageMediaPhoto = _tl_types.MessageMediaPhoto
 DocumentAttributeAudio = _tl_types.DocumentAttributeAudio
 DialogFilter = _tl_types.DialogFilter
 DialogFilterDefault = _tl_types.DialogFilterDefault
@@ -130,6 +136,9 @@ def telegram_syncer(tmp_store, tmp_path):
         "monitored_folders": [],
         "max_messages_per_chat": 200,
         "transcribe_voice": False,
+        "download_media": False,
+        "describe_images": False,
+        "ocr_images": False,
         "exclude_patterns": ["Spam"],
     }
     with patch.object(_tg_mod, "get_source_config", return_value=config), \
@@ -288,6 +297,56 @@ class TestTelegramIsVoice:
         msg = MagicMock()
         msg.media = media
         assert telegram_syncer._is_voice(msg) is False
+
+
+class TestTelegramImages:
+    """Tests for Telegram image media handling."""
+
+    def test_photo_media_is_image(self, telegram_syncer):
+        msg = MagicMock()
+        msg.media = MessageMediaPhoto(photo=MagicMock())
+        assert telegram_syncer._is_image(msg) is True
+
+    def test_image_document_is_image(self, telegram_syncer):
+        doc = MagicMock()
+        doc.mime_type = "image/png"
+        msg = MagicMock()
+        msg.media = MessageMediaDocument(document=doc)
+        assert telegram_syncer._is_image(msg) is True
+        assert telegram_syncer._image_mime(msg) == "image/png"
+
+    def test_non_image_document_is_not_image(self, telegram_syncer):
+        doc = MagicMock()
+        doc.mime_type = "application/pdf"
+        msg = MagicMock()
+        msg.media = MessageMediaDocument(document=doc)
+        assert telegram_syncer._is_image(msg) is False
+
+    def test_process_image_downloads_and_adds_context(self, telegram_syncer):
+        telegram_syncer.config["download_media"] = True
+        telegram_syncer.config["describe_images"] = True
+        telegram_syncer.config["ocr_images"] = True
+
+        async def fake_download_media(_msg, file):
+            Path(file).write_bytes(b"fake image")
+            return file
+
+        client = AsyncMock()
+        client.download_media.side_effect = fake_download_media
+
+        msg = MagicMock()
+        msg.id = 456
+        msg.media = MessageMediaPhoto(photo=MagicMock())
+
+        with patch.object(telegram_syncer, "_describe_image", return_value="A whiteboard sketch"), \
+             patch.object(telegram_syncer, "_ocr_image", return_value="Visible text"):
+            text, attachment = asyncio.run(telegram_syncer._process_image(client, msg, "123"))
+
+        assert "A whiteboard sketch" in text
+        assert "Visible text" in text
+        assert attachment["type"] == "image"
+        assert attachment["mime_type"] == "image/jpeg"
+        assert Path(attachment["path"]).exists()
 
 
 class TestTelegramGetClient:

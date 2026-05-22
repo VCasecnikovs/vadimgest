@@ -173,6 +173,12 @@ telegram:
   enabled: true
   monitored_folders: [Work, Friends]
   max_messages_per_chat: 500
+  transcribe_voice: true      # Telegram Premium voice transcription
+  download_media: true        # save supported media under data/media/telegram
+  describe_images: true       # optional Gemini vision summaries
+  ocr_images: true            # local tesseract OCR when installed
+  image_describer_provider: gemini
+  image_describer_model: gemini-3.5-flash
 
 signal:
   enabled: true
@@ -184,6 +190,10 @@ obsidian:
 gmail:
   enabled: true
 ```
+
+Image descriptions require `GEMINI_API_KEY` in the environment or in the `.env`
+loaded by vadimgest. OCR works without an API key when `tesseract` is installed,
+but only for installed language packs.
 
 Run `vadimgest init` to generate a config file from the template, or use the dashboard wizard to configure everything visually.
 

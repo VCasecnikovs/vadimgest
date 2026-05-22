@@ -19,6 +19,15 @@ telegram:
   monitored_folders: []
   include_contacts: true
   auto_add_private: true
+  transcribe_voice: false
+  download_media: false
+  describe_images: false
+  image_describer_provider: gemini
+  image_describer_model: gemini-3.5-flash
+  ocr_images: false
+  ocr_lang: eng
+  max_image_bytes: 8000000
+  # media_dir: ~/.local/share/vadimgest/media/telegram
 
 signal:
   enabled: false

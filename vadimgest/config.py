@@ -28,24 +28,26 @@ _HOME_CONFIG_DIR = Path.home() / ".vadimgest"
 
 
 def _load_dotenv():
-    """Try to load .env from config dir, data dir, or cwd."""
+    """Try to load .env from config dir, repo roots, or cwd."""
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
 
-    # Try multiple locations
+    # Load multiple locations without overriding already-set values. This lets a
+    # sparse source-specific .env coexist with a repo-level .env.
     xdg_cfg = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
     for env_path in [
         _find_config_dir() / ".env" if _find_config_dir() else None,
         xdg_cfg / "vadimgest" / ".env",
         _HOME_CONFIG_DIR / ".env",
         _PACKAGE_DIR / ".env",
+        _PACKAGE_DIR.parent / ".env",
+        _PACKAGE_DIR.parents[1] / ".env",
         Path.cwd() / ".env",
     ]:
         if env_path and env_path.exists():
-            load_dotenv(env_path)
-            return
+            load_dotenv(env_path, override=False)
 
 
 def _find_config_dir() -> Path | None:
@@ -178,7 +180,7 @@ def get_source_config(source_name: str) -> dict:
 
     # Expand path values
     for key in ("vault_path", "cache_path", "db_path", "projects_dir",
-                "session_file", "legacy_db", "browser_data_dir"):
+                "session_file", "legacy_db", "browser_data_dir", "media_dir"):
         if key in merged and isinstance(merged[key], str):
             merged[key] = _expand_path(merged[key])
 
@@ -235,6 +237,13 @@ _SOURCE_DEFAULTS = {
         "monitored_folders": [],
         "include_contacts": True,
         "auto_add_private": True,
+        "download_media": False,
+        "describe_images": False,
+        "image_describer_provider": "gemini",
+        "image_describer_model": "gemini-3.5-flash",
+        "ocr_images": False,
+        "ocr_lang": "eng",
+        "max_image_bytes": 8000000,
     },
     "signal": {
         "enabled": False,

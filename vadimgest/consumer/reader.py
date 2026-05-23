@@ -77,11 +77,26 @@ class ConsumerReader:
             return ConsumerCheckpoint.from_dict(data)
         return ConsumerCheckpoint(consumer=consumer)
 
+    def _file_line_count(self, source: str) -> int:
+        """Count actual lines in JSONL file, bypassing stale SourceState cache."""
+        source_file = self.store.sources_dir / f"{source}.jsonl"
+        if not source_file.exists():
+            return 0
+        count = 0
+        with open(source_file, "r") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+        return count
+
     def commit(self, source: str, consumer: str, line: int | None = None, record_id: str | None = None):
         """Advance consumer's checkpoint for a source."""
         checkpoint = self.get_checkpoint(consumer)
         if line is None:
-            line = self.store.count(source)
+            # Use actual file line count, not stale SourceState.total_records.
+            # Daemon-written sources (telegram) can add records without updating
+            # SourceState, causing the checkpoint to lag behind the real file end.
+            line = self._file_line_count(source)
         checkpoint.positions[source] = {"line": line, "id": record_id}
         checkpoint.updated_at = datetime.now(timezone.utc).isoformat()
         checkpoint_file = self.checkpoints_dir / f"{consumer}.json"

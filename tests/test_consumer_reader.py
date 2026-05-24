@@ -162,8 +162,8 @@ class TestCommit:
             for i in (3, 4):
                 f.write(_json.dumps({"line": i + 1, "data": {"id": f"daemon-{i}", "text": f"daemon msg {i}"}}) + "\n")
 
-        # state.total_records is still 3, but file has 5 lines
-        assert store.count("telegram") == 3
+        # store.count() now reads actual file lines, so it returns 5 (not stale 3)
+        assert store.count("telegram") == 5
 
         reader.commit("telegram", "heartbeat")
 

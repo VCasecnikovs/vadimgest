@@ -186,8 +186,18 @@ class DataStore:
                     yield Record.from_jsonl(raw_line)
 
     def count(self, source: str) -> int:
-        state = self.get_state(source)
-        return state.total_records
+        # Use actual file line count — state.total_records can lag when the
+        # daemon appends directly to the JSONL without going through store.append().
+        # Regression: telegram daemon caused stale counts (2026-05-23).
+        source_file = self.sources_dir / f"{source}.jsonl"
+        if not source_file.exists():
+            return 0
+        count = 0
+        with open(source_file) as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+        return count
 
     # ── Consumer: backward-compat shims (real logic in consumer/reader.py) ──
 

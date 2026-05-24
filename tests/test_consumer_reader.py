@@ -147,6 +147,30 @@ class TestCommit:
         cp = reader.get_checkpoint("heartbeat")
         assert cp.updated_at != ""
 
+    def test_commit_uses_actual_file_count_not_state_cache(self, reader, store):
+        # Regression: telegram daemon writes directly to JSONL without going through
+        # store.append(), leaving SourceState.total_records stale (e.g. 3 vs 5 actual).
+        # commit() must count actual file lines so the checkpoint advances correctly.
+        # Without the fix, the checkpoint would land on 3, causing heartbeat to replay
+        # the last 2 records on every tick (observed May 23 2026, telegram + dayflow).
+        _add_records(store, "telegram", 3)  # state.total_records = 3
+
+        # Simulate daemon directly appending 2 more records, bypassing store.append()
+        source_file = store.sources_dir / "telegram.jsonl"
+        import json as _json
+        with open(source_file, "a") as f:
+            for i in (3, 4):
+                f.write(_json.dumps({"line": i + 1, "data": {"id": f"daemon-{i}", "text": f"daemon msg {i}"}}) + "\n")
+
+        # state.total_records is still 3, but file has 5 lines
+        assert store.count("telegram") == 3
+
+        reader.commit("telegram", "heartbeat")
+
+        cp = reader.get_checkpoint("heartbeat")
+        # Must be 5 (actual file), not 3 (stale state)
+        assert cp.positions["telegram"]["line"] == 5
+
 
 class TestCommitAll:
     def test_commits_all_sources(self, reader, store):

@@ -20,6 +20,8 @@ def get_db(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
+    # Allow up to 30s for write locks held by vadimgest serve or other writers
+    conn.execute("PRAGMA busy_timeout = 30000")
 
     # Check schema version
     conn.execute("CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)")

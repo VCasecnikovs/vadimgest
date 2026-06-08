@@ -724,6 +724,21 @@ class TestShowHealth:
         out = capsys.readouterr().out
         assert "ok" in out
 
+    def test_show_health_with_timezone_aware_run(self, tmp_path, capsys):
+        store = DataStore(tmp_path)
+        runs_file = tmp_path / "sync_runs.jsonl"
+        now = datetime.now(timezone.utc)
+        run = {"source": "telegram", "ts": now.isoformat(), "status": "ok", "count": 5}
+        runs_file.write_text(json.dumps(run) + "\n")
+
+        with patch("vadimgest.cli.all_source_names", return_value=["telegram"]), \
+             patch("vadimgest.cli.get_source_config", return_value={"mode": "cron"}), \
+             patch("vadimgest.cli.get_syncer_class", return_value=MagicMock()):
+            show_health(store)
+
+        out = capsys.readouterr().out
+        assert "ok" in out
+
     def test_show_health_with_stale_run(self, tmp_path, capsys):
         store = DataStore(tmp_path)
         runs_file = tmp_path / "sync_runs.jsonl"

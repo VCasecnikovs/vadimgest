@@ -364,6 +364,19 @@ _SOURCE_DEFAULTS = {
         "mode": "cron",
         "schedule": "*/30 * * * *",
     },
+    "slack": {
+        "enabled": False,
+        "mode": "cron",
+        "schedule": "*/15 * * * *",
+        "token": "${SLACK_TOKEN}",
+        "workspace": "",
+        "channels": [],
+        "types": "public_channel,private_channel,im,mpim",
+        "bootstrap_days": 7,
+        "page_size": 100,
+        "max_channels": 200,
+        "include_threads": False,
+    },
 }
 
 

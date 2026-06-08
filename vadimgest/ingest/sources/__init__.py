@@ -52,6 +52,7 @@ _SYNCER_REGISTRY = {
     "linkedin": (".linkedin.syncer", "LinkedInSyncer"),
     "xnews": (".xnews.syncer", "XNewsSyncer"),
     "hlopya": (".hlopya.syncer", "HlopyaSyncer"),
+    "slack": (".slack.syncer", "SlackSyncer"),
 }
 
 # Cache of loaded syncer classes

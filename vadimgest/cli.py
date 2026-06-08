@@ -642,6 +642,12 @@ _SOURCE_REQUIREMENTS = {
         "external": [],
         "setup": "linkedin.email + linkedin.password in config.yaml",
     },
+    "slack": {
+        "platform": "any",
+        "pip_extra": None,
+        "external": [],
+        "setup": "Slack app OAuth token in SLACK_TOKEN or slack.token",
+    },
 }
 
 

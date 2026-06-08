@@ -138,6 +138,7 @@ def show_health(store: DataStore):
                     pass
 
     now = datetime.now(timezone.utc)
+    now_naive = datetime.now()
     all_ok = True
 
     for source in all_source_names():
@@ -164,10 +165,10 @@ def show_health(store: DataStore):
                 last = runs[-1]
                 last_ts = datetime.fromisoformat(last["ts"])
                 if last_ts.tzinfo is None:
-                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                    age = now_naive - last_ts
                 else:
                     last_ts = last_ts.astimezone(timezone.utc)
-                age = now - last_ts
+                    age = now - last_ts
 
                 if not ready.get("ok", True):
                     missing = ready.get("missing", [])
@@ -640,6 +641,12 @@ _SOURCE_REQUIREMENTS = {
         "pip_extra": "linkedin-api",
         "external": [],
         "setup": "linkedin.email + linkedin.password in config.yaml",
+    },
+    "slack": {
+        "platform": "any",
+        "pip_extra": None,
+        "external": [],
+        "setup": "Slack app OAuth token in SLACK_TOKEN or slack.token",
     },
 }
 

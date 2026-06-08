@@ -97,7 +97,7 @@ class TestManifestContent:
             assert "type" in field_def, (
                 f"{source_name}.config_schema['{field_name}'] missing 'type'"
             )
-            assert field_def["type"] in ("str", "int", "bool", "list", "path"), (
+            assert field_def["type"] in ("str", "int", "bool", "list", "path", "select"), (
                 f"{source_name}.config_schema['{field_name}'] invalid type '{field_def['type']}'"
             )
 

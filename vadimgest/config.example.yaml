@@ -19,6 +19,15 @@ telegram:
   monitored_folders: []
   include_contacts: true
   auto_add_private: true
+  transcribe_voice: false
+  download_media: false
+  describe_images: false
+  image_describer_provider: gemini
+  image_describer_model: gemini-3.5-flash
+  ocr_images: false
+  ocr_lang: eng
+  max_image_bytes: 8000000
+  # media_dir: ~/.local/share/vadimgest/media/telegram
 
 signal:
   enabled: false
@@ -98,6 +107,21 @@ imessage:
   schedule: "*/15 * * * *"
   # macOS only - requires Full Disk Access
   # Compile: swiftc -O sources/imessage/export.swift -o sources/imessage/imessage-export
+
+slack:
+  enabled: false
+  mode: cron
+  schedule: "*/15 * * * *"
+  # Prefer SLACK_TOKEN in your environment / .env.
+  token: ${SLACK_TOKEN}
+  workspace: ""
+  # Optional channel names or IDs. Empty = all accessible conversations.
+  channels: []
+  types: "public_channel,private_channel,im,mpim"
+  bootstrap_days: 7
+  page_size: 100
+  max_channels: 200
+  include_threads: false
 
 # Conversation grouping (for messaging sources)
 conversation:

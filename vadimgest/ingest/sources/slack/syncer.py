@@ -301,11 +301,11 @@ class SlackSyncer(CronSyncer):
 
         if state.last_ts:
             try:
-                oldest = str(datetime.fromisoformat(state.last_ts.replace("Z", "+00:00")).timestamp())
+                oldest = str(int(datetime.fromisoformat(state.last_ts.replace("Z", "+00:00")).timestamp()))
             except ValueError:
                 oldest = str(float(state.last_ts))
         else:
-            oldest = str(time.time() - self.bootstrap_days * 86400)
+            oldest = str(int(time.time() - self.bootstrap_days * 86400))
 
         channels = self._list_conversations()
         self.log(f"Fetching Slack history from {len(channels)} conversations")

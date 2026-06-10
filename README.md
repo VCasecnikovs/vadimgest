@@ -52,6 +52,7 @@ The web dashboard gives you a full overview of your data and lets you manage sou
 
 ![Dashboard source grid](docs/images/dashboard.png)
 
+- **Observatory** - one health surface for server hub, edge devices, source freshness, search, queue lag, and Klava processing
 - **Source grid** with live status, record counts, and last sync times
 - **Setup wizard** - guided onboarding that installs dependencies and handles auth
 - **Source drawers** - configure each source, view setup checklists, trigger syncs
@@ -109,6 +110,21 @@ vadimgest daemon --interval 300 &
 - **Source manifests** - what each source collects, auth needed, last sync, record count, and freshness.
 
 High-value edge sources include iMessage, Apple Notes, Reminders, Contacts, Calendar local cache, screenshots/OCR metadata, browser history, downloads/bookmarks, local app usage, and local agent histories.
+
+The dashboard's Edge Sync page manages tokens, local edge config, connection tests, one-shot runs, and service install/uninstall. The Observatory page shows whether the server has seen each edge token recently, whether the local edge agent can reach the server, per-source upload lag, and the last edge-agent errors.
+
+Minimal edge flow:
+
+```bash
+# On the server hub
+vadimgest serve --port 8484
+# Open Edge Sync and generate a token
+
+# On the laptop
+export VADIMGEST_EDGE_TOKEN=vg_edge_...
+vadimgest serve --port 8484
+# Open Edge Sync, set server URL, choose local sources, then Run Once or Install/Start Agent
+```
 
 ## Search
 
@@ -241,11 +257,18 @@ Sources          vadimgest sync          Storage            Search
  Signal     -->    21 syncers          (append-only)      350K+ docs
  Gmail      -->    cron / daemon        one per source     <50ms queries
  ...21 total -->                   -->                -->
+
+Laptop-only sources  vadimgest edge-agent  Server hub
+ iMessage        -->                    --> canonical JSONL
+ Browser         -->  normalized events     Observatory
+ Dayflow         -->  idempotent upload      Klava processing
 ```
 
 Each source has a syncer that knows how to pull new data. Syncers run on a schedule (cron mode) or continuously (daemon mode). Data is written as append-only JSONL - records are never modified or deleted.
 
 The search index is a SQLite FTS5 database that indexes both JSONL records and Obsidian markdown files. Incremental updates take under a second.
+
+Observatory reads the same state files and APIs that production uses: source state, sync runs, edge token metadata, edge-agent checkpoints, consumer checkpoints, search index metadata, and the optional Klava dashboard API. If Klava is unreachable, vadimgest remains usable and marks that section as unknown.
 
 ## Consumer API
 

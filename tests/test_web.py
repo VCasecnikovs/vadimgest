@@ -103,13 +103,13 @@ class TestDashboardHTML:
     def test_has_all_tabs(self, client):
         resp = client.get("/")
         html = resp.data.decode()
-        for tab in ["Dashboard", "Sources", "Docs"]:
+        for tab in ["Dashboard", "Observatory", "Sources", "Docs"]:
             assert tab in html, f"Tab '{tab}' missing from dashboard"
 
     def test_has_api_fetch_calls(self, client):
         resp = client.get("/")
         html = resp.data.decode()
-        for endpoint in ["/api/sources", "/api/runs", "/api/config", "/api/queues", "/api/consumers"]:
+        for endpoint in ["/api/sources", "/api/runs", "/api/config", "/api/queues", "/api/consumers", "/api/observatory"]:
             assert endpoint in html, f"API endpoint '{endpoint}' not referenced in JS"
 
     def test_js_syntax_valid(self, client):
@@ -193,6 +193,73 @@ class TestAPIGet:
         assert resp.status_code == 200
         data = resp.get_json()
         assert isinstance(data, list)
+
+    def test_observatory_returns_unified_status(self, fresh_client, monkeypatch):
+        client, _ = fresh_client
+        monkeypatch.setattr(
+            "vadimgest.web.app._fetch_json_url",
+            lambda url, timeout=1.5: ({"stats": {"health_score": 95}, "services": [], "cron_jobs": []}, None),
+        )
+
+        resp = client.get("/api/observatory")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] in {"healthy", "degraded", "broken", "unknown"}
+        assert data["positioning"]["vadimgest"].startswith("personal source-of-truth")
+        assert {"server", "edge", "sources", "search", "queues", "klava"} <= {s["key"] for s in data["subsystems"]}
+        assert data["klava"]["reachable"] is True
+
+    def test_observatory_treats_unreachable_klava_as_unknown(self, fresh_client, monkeypatch):
+        client, _ = fresh_client
+        monkeypatch.setattr(
+            "vadimgest.web.app._fetch_json_url",
+            lambda url, timeout=1.5: (None, "connection refused"),
+        )
+
+        resp = client.get("/api/observatory")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["klava"]["status"] == "unknown"
+        assert data["klava"]["reachable"] is False
+        assert "connection refused" in data["klava"]["error"]
+
+    def test_observatory_reports_edge_pending_records(self, fresh_client, monkeypatch):
+        client, env = fresh_client
+        monkeypatch.setattr(
+            "vadimgest.web.app._fetch_json_url",
+            lambda url, timeout=1.5: (None, "not running"),
+        )
+        from vadimgest.config import save_edge_config
+        from vadimgest.store import DataStore
+
+        save_edge_config({
+            "enabled": True,
+            "server_url": "https://bakeneko.test",
+            "device_id": "macbook-test",
+            "sources": ["local"],
+        })
+        store = DataStore(env["data_home"])
+        store.append("local", {"id": "one", "type": "note"})
+        store.append("local", {"id": "two", "type": "note"})
+        (env["data_home"] / "edge_state.json").write_text(json.dumps({
+            "sources": {"local": {"uploaded_line": 1, "updated_at": "2026-06-10T00:00:00+00:00"}},
+            "last_run": {
+                "ok": True,
+                "device_id": "macbook-test",
+                "hostname": "macbook",
+                "finished_at": "2026-06-10T00:00:00+00:00",
+                "errors": [],
+            },
+        }))
+
+        resp = client.get("/api/observatory")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["edge"]["local_agent"]["pending_total"] == 1
+        assert data["edge"]["local_agent"]["sources"][0]["source"] == "local"
 
     def test_sources_have_required_fields(self, client):
         resp = client.get("/api/sources")

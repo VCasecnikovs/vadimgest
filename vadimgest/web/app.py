@@ -5,9 +5,10 @@ import os
 import sys
 import time
 import threading
+import urllib.request
 
 import yaml
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, request, Response
@@ -70,6 +71,44 @@ def _safe_error(e: Exception) -> str:
     if home in msg:
         msg = msg.replace(home, "~")
     return msg
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _hours_old(value, *, now: datetime | None = None) -> float | None:
+    dt = _parse_dt(value)
+    if dt is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return max(0.0, (now - dt).total_seconds() / 3600)
+
+
+def _worst_status(items: list[dict]) -> str:
+    if not items:
+        return "unknown"
+    order = {"healthy": 0, "unknown": 1, "degraded": 2, "broken": 3}
+    return max((str(i.get("status") or "unknown") for i in items), key=lambda s: order.get(s, 1))
+
+
+def _fetch_json_url(url: str, *, timeout: float = 1.5) -> tuple[dict | None, str | None]:
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw or "{}"), None
+    except Exception as e:
+        return None, _safe_error(e)
 
 
 def create_app(store: DataStore | None = None) -> Flask:
@@ -296,6 +335,311 @@ def create_app(store: DataStore | None = None) -> Flask:
                         continue
         return runs[-limit:]
 
+    def _get_search_health() -> dict:
+        try:
+            from ..search.indexer import DEFAULT_DB
+            import sqlite3
+            db_path = DEFAULT_DB
+            if not db_path.exists():
+                return {"available": False, "reason": "Index not built"}
+            conn = sqlite3.connect(str(db_path))
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM docs").fetchone()
+                total = row[0] if row else 0
+                sources_row = conn.execute(
+                    "SELECT source, COUNT(*) FROM docs GROUP BY source ORDER BY COUNT(*) DESC"
+                ).fetchall()
+                stat = conn.execute("SELECT value FROM schema_info WHERE key='last_indexed'").fetchone()
+            finally:
+                conn.close()
+            size_bytes = db_path.stat().st_size
+            return {
+                "available": True,
+                "db_path": str(db_path),
+                "total_documents": total,
+                "size_mb": round(size_bytes / 1048576, 1),
+                "last_indexed": stat[0] if stat else None,
+                "by_source": {r[0]: r[1] for r in sources_row},
+            }
+        except Exception as e:
+            return {"available": False, "reason": _safe_error(e)}
+
+    def _get_queues_data() -> dict:
+        stats = store.stats()
+        consumers = {}
+        for f in store.checkpoints_dir.glob("*.json"):
+            try:
+                consumers[f.stem] = json.loads(f.read_text())
+            except Exception:
+                continue
+
+        consumer_names = sorted(consumers.keys())
+        source_names = sorted(all_source_names())
+        rows = []
+        totals = {c: 0 for c in consumer_names}
+        for src in source_names:
+            total = stats.get(src, {}).get("records", 0)
+            pending = {}
+            for c in consumer_names:
+                pos = consumers[c].get("positions", {}).get(src, {})
+                line = pos.get("line", 0)
+                p = max(0, total - line)
+                pending[c] = p
+                totals[c] += p
+            rows.append({"source": src, "total": total, "pending": pending})
+
+        return {
+            "consumers": consumer_names,
+            "rows": rows,
+            "totals": totals,
+            "updated": {c: consumers[c].get("updated_at") for c in consumer_names},
+        }
+
+    def _source_observatory(sources: list[dict], runs: list[dict]) -> dict:
+        now = datetime.now(timezone.utc)
+        latest_by_source = {}
+        for run in runs:
+            src = run.get("source")
+            if src:
+                latest_by_source[src] = run
+
+        items = []
+        for src in sources:
+            latest = latest_by_source.get(src["name"])
+            last_seen = (latest or {}).get("ts") or src.get("last_ts")
+            age = _hours_old(last_seen, now=now)
+            reason = ""
+            if not src.get("enabled"):
+                status = "healthy"
+                reason = "disabled"
+            elif src.get("ready") and not src["ready"].get("ok", True):
+                status = "broken"
+                reason = ", ".join(src["ready"].get("missing", []) or ["setup required"])
+            elif latest and latest.get("status") == "error":
+                status = "broken"
+                reason = latest.get("error") or "last sync failed"
+            elif last_seen is None:
+                status = "unknown"
+                reason = "no sync telemetry"
+            elif age is not None and age > 24:
+                status = "degraded"
+                reason = f"last activity {int(age)}h ago"
+            else:
+                status = "healthy"
+                reason = "fresh"
+            items.append({
+                "name": src["name"],
+                "display_name": src.get("display_name") or src["name"],
+                "status": status,
+                "enabled": src.get("enabled", False),
+                "records": src.get("records", 0),
+                "last_sync": (latest or {}).get("ts"),
+                "last_data": src.get("last_ts"),
+                "last_error": latest.get("error") if latest else None,
+                "reason": reason,
+                "runs_via": "vadimgest",
+                "where": "server" if not any(r.startswith("macos") for r in src.get("dependencies", {}).get("os", []) or []) else "edge",
+            })
+        return {
+            "status": _worst_status([i for i in items if i.get("enabled")]),
+            "total": len(items),
+            "enabled": len([i for i in items if i.get("enabled")]),
+            "broken": len([i for i in items if i["status"] == "broken"]),
+            "degraded": len([i for i in items if i["status"] == "degraded"]),
+            "unknown": len([i for i in items if i["status"] == "unknown"]),
+            "items": items,
+        }
+
+    def _edge_observatory() -> dict:
+        cfg = get_edge_config()
+        tokens = list_edge_tokens(store.base_path)
+        state_file = store.base_path / "edge_state.json"
+        state = {}
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+            except Exception:
+                state = {}
+
+        selected_sources = cfg.get("sources") or []
+        source_names = selected_sources or [
+            s for s in all_source_names()
+            if get_source_config(s).get("enabled", False)
+        ]
+        pending = []
+        source_state = state.get("sources", {}) if isinstance(state.get("sources"), dict) else {}
+        for source in source_names:
+            uploaded_line = int((source_state.get(source) or {}).get("uploaded_line") or 0)
+            total = store.count(source)
+            pending.append({
+                "source": source,
+                "total": total,
+                "uploaded_line": uploaded_line,
+                "pending": max(0, total - uploaded_line),
+                "updated_at": (source_state.get(source) or {}).get("updated_at"),
+            })
+
+        last_run = state.get("last_run") if isinstance(state.get("last_run"), dict) else {}
+        last_run_age = _hours_old(last_run.get("finished_at"))
+        token_items = []
+        for token in tokens:
+            age = _hours_old(token.get("last_seen_at"))
+            if not token.get("active"):
+                status = "healthy"
+                reason = "revoked"
+            elif not token.get("last_seen_at"):
+                status = "unknown"
+                reason = "never seen"
+            elif age is not None and age > 24:
+                status = "degraded"
+                reason = f"last seen {int(age)}h ago"
+            else:
+                status = "healthy"
+                reason = "recent"
+            token_items.append({**token, "status": status, "reason": reason})
+
+        local_errors = last_run.get("errors") or []
+        if local_errors:
+            local_status = "broken"
+        elif cfg.get("enabled") and not cfg.get("server_url"):
+            local_status = "broken"
+        elif cfg.get("enabled") and last_run_age is not None and last_run_age > 24:
+            local_status = "degraded"
+        elif cfg.get("enabled") and not last_run:
+            local_status = "unknown"
+        else:
+            local_status = "healthy"
+
+        try:
+            from .autostart import is_edge_installed
+            installed = is_edge_installed()
+        except Exception:
+            installed = False
+
+        parts = token_items + [{"status": local_status}]
+        return {
+            "status": _worst_status(parts),
+            "ingest_url": request.host_url.rstrip("/") + "/api/edge/events/batch",
+            "server_can_see_edge": any(t.get("last_seen_at") and t.get("active") for t in token_items),
+            "edge_can_reach_server": bool(last_run.get("ok")) if last_run else None,
+            "tokens": token_items,
+            "local_agent": {
+                "status": local_status,
+                "installed": installed,
+                "enabled": bool(cfg.get("enabled")),
+                "device_id": cfg.get("device_id") or last_run.get("device_id"),
+                "hostname": last_run.get("hostname"),
+                "server_url": cfg.get("server_url"),
+                "config_path": str(_find_config_file()) if _find_config_file() else None,
+                "state_path": str(state_file),
+                "last_run": last_run,
+                "pending_total": sum(p["pending"] for p in pending),
+                "sources": pending,
+                "version": "1",
+            },
+        }
+
+    def _klava_observatory() -> dict:
+        url = os.environ.get("VADIMGEST_KLAVA_STATUS_URL", "http://127.0.0.1:18788/api/dashboard")
+        data, error = _fetch_json_url(url)
+        if error or not isinstance(data, dict) or data.get("error"):
+            return {
+                "status": "unknown",
+                "url": url,
+                "reachable": False,
+                "error": error or (data.get("error") if isinstance(data, dict) else "unreachable"),
+            }
+
+        stats = data.get("stats") or {}
+        health_score = stats.get("health_score")
+        failing_jobs = data.get("failing_jobs") or []
+        services = data.get("services") or []
+        cron_jobs = data.get("cron_jobs") or []
+        down_services = [s for s in services if not s.get("running")]
+        if isinstance(health_score, (int, float)) and health_score < 50:
+            status = "broken"
+        elif down_services or failing_jobs or (isinstance(health_score, (int, float)) and health_score < 80):
+            status = "degraded"
+        else:
+            status = "healthy"
+
+        return {
+            "status": status,
+            "url": url,
+            "reachable": True,
+            "generated_at": data.get("generated_at"),
+            "health_score": health_score,
+            "services": {
+                "total": len(services),
+                "down": len(down_services),
+                "items": services,
+            },
+            "cron": {
+                "total": len(cron_jobs),
+                "failing": len(failing_jobs),
+                "failing_jobs": failing_jobs,
+            },
+            "heartbeat_backlog": len(data.get("heartbeat_backlog") or []),
+            "activity": (data.get("activity") or [])[:8],
+        }
+
+    def _collect_observatory() -> dict:
+        sources = _get_sources_data()
+        runs = _get_sync_runs(100)
+        queues = _get_queues_data()
+        search = _get_search_health()
+        source_status = _source_observatory(sources, runs)
+        edge = _edge_observatory()
+        klava = _klava_observatory()
+        daemon_running = _daemon is not None and not _daemon._stop.is_set()
+        queue_pending = sum(queues.get("totals", {}).values())
+        queue_status = "degraded" if queue_pending > 1000 else "healthy"
+        search_status = "healthy" if search.get("available") else "broken"
+        server = {
+            "status": "healthy",
+            "data_dir": str(store.base_path),
+            "config_file": str(_find_config_file()) if _find_config_file() else None,
+            "dashboard": "running",
+            "daemon": {
+                "status": "healthy" if daemon_running else "unknown",
+                "running": daemon_running,
+                "started_at": _daemon_started_at if daemon_running else None,
+            },
+        }
+        subsystems = [
+            {"key": "server", "label": "Server Hub", **server},
+            {"key": "edge", "label": "Edge Devices", "status": edge["status"]},
+            {"key": "sources", "label": "Sources", "status": source_status["status"]},
+            {"key": "search", "label": "Search", "status": search_status},
+            {"key": "queues", "label": "Queues", "status": queue_status},
+            {"key": "klava", "label": "Klava Processing", "status": klava["status"]},
+        ]
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "status": _worst_status(subsystems),
+            "positioning": {
+                "vadimgest": "personal source-of-truth event lake, search index, and source-backed record store",
+                "vadimgest_edge": "local privacy-boundary collector that pushes laptop-only records to Bakeneko",
+                "klava": "operator layer that consumes vadimgest and Obsidian context, creates tasks/results, and writes durable knowledge back",
+            },
+            "subsystems": subsystems,
+            "server": server,
+            "edge": edge,
+            "sources": source_status,
+            "search": {"status": search_status, **search},
+            "queues": {
+                "status": queue_status,
+                "pending_total": queue_pending,
+                **queues,
+            },
+            "klava": klava,
+            "recent_errors": [
+                {"source": r.get("source"), "ts": r.get("ts"), "error": r.get("error"), "where": "vadimgest"}
+                for r in reversed(runs)
+                if r.get("status") == "error" or r.get("error")
+            ][:12],
+        }
+
     # ---- Routes ----
 
     @app.route("/")
@@ -432,37 +776,11 @@ def create_app(store: DataStore | None = None) -> Flask:
 
     @app.route("/api/queues")
     def api_queues():
-        stats = store.stats()
-        consumers = {}
-        for f in store.checkpoints_dir.glob("*.json"):
-            consumers[f.stem] = json.loads(f.read_text())
+        return jsonify(_get_queues_data())
 
-        consumer_names = sorted(consumers.keys())
-        source_names = sorted(all_source_names())
-
-        rows = []
-        totals = {c: 0 for c in consumer_names}
-        for src in source_names:
-            total = stats.get(src, {}).get("records", 0)
-            pending = {}
-            for c in consumer_names:
-                pos = consumers[c].get("positions", {}).get(src, {})
-                line = pos.get("line", 0)
-                p = max(0, total - line)
-                pending[c] = p
-                totals[c] += p
-            rows.append({"source": src, "total": total, "pending": pending})
-
-        updated = {}
-        for c in consumer_names:
-            updated[c] = consumers[c].get("updated_at")
-
-        return jsonify({
-            "consumers": consumer_names,
-            "rows": rows,
-            "totals": totals,
-            "updated": updated,
-        })
+    @app.route("/api/observatory")
+    def api_observatory():
+        return jsonify(_collect_observatory())
 
     @app.route("/api/sync", methods=["POST"])
     def api_sync():
@@ -756,14 +1074,12 @@ def create_app(store: DataStore | None = None) -> Flask:
                 if shutil.which("npm"):
                     return jsonify({"ok": True, "output": "npm already installed"})
                 if not shutil.which("brew"):
-                    return jsonify({"ok": False, "error": "Install Homebrew first"}), 400
+                    return jsonify({"ok": False, "error": "needs_brew",
+                                    "install_cmd": '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'})
                 cmd = ["brew", "install", "node"]
                 result = _run(cmd, timeout=300)
 
             elif method == "brew":
-                if not shutil.which("brew"):
-                    return jsonify({"ok": False, "error": "needs_brew",
-                                    "install_cmd": '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'}), 400
                 allowed_brew = {
                     "sigtop": {"formula": "tbvdm/tap/sigtop", "head": True},
                     "wacli": {"formula": "steipete/tap/wacli"},
@@ -772,6 +1088,9 @@ def create_app(store: DataStore | None = None) -> Flask:
                 }
                 if package not in allowed_brew:
                     return jsonify({"error": f"brew package '{package}' not allowed"}), 400
+                if not shutil.which("brew"):
+                    return jsonify({"ok": False, "error": "needs_brew",
+                                    "install_cmd": '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'})
                 info = allowed_brew[package]
                 cmd = ["brew", "install"]
                 if info.get("head"):
@@ -797,13 +1116,13 @@ def create_app(store: DataStore | None = None) -> Flask:
                         result = _run(cmd)
 
             elif method == "pipx":
-                pipx = shutil.which("pipx") or shutil.which("uv")
-                if not pipx:
-                    return jsonify({"ok": False, "error": "needs_pipx",
-                                    "install_cmd": "brew install pipx"}), 400
                 allowed_pipx = {"bird-cli"}
                 if package not in allowed_pipx:
                     return jsonify({"error": f"pipx package '{package}' not allowed"}), 400
+                pipx = shutil.which("pipx") or shutil.which("uv")
+                if not pipx:
+                    return jsonify({"ok": False, "error": "needs_pipx",
+                                    "install_cmd": "brew install pipx"})
                 installed_binary = {"bird-cli": "bird"}.get(package, package)
                 if shutil.which(installed_binary):
                     _clear_caches()
@@ -813,13 +1132,13 @@ def create_app(store: DataStore | None = None) -> Flask:
                 result = _run(cmd)
 
             elif method == "npm":
-                npm = shutil.which("npm")
-                if not npm:
-                    return jsonify({"ok": False, "error": "needs_npm",
-                                    "install_cmd": "brew install node"}), 400
                 allowed_npm = {"@steipete/bird"}
                 if package not in allowed_npm:
                     return jsonify({"error": f"npm package '{package}' not allowed"}), 400
+                npm = shutil.which("npm")
+                if not npm:
+                    return jsonify({"ok": False, "error": "needs_npm",
+                                    "install_cmd": "brew install node"})
                 cmd = [npm, "install", "-g", package]
                 result = _run(cmd, timeout=120)
 
@@ -1252,32 +1571,7 @@ def create_app(store: DataStore | None = None) -> Flask:
 
     @app.route("/api/search/health")
     def api_search_health():
-        try:
-            from ..search.indexer import DEFAULT_DB
-            import sqlite3
-            db_path = DEFAULT_DB
-            if not db_path.exists():
-                return jsonify({"available": False, "reason": "Index not built"})
-            conn = sqlite3.connect(str(db_path))
-            row = conn.execute("SELECT COUNT(*) FROM docs").fetchone()
-            total = row[0] if row else 0
-            sources_row = conn.execute(
-                "SELECT source, COUNT(*) FROM docs GROUP BY source ORDER BY COUNT(*) DESC"
-            ).fetchall()
-            stat = conn.execute("SELECT value FROM schema_info WHERE key='last_indexed'").fetchone()
-            last_indexed = stat[0] if stat else None
-            conn.close()
-            size_bytes = db_path.stat().st_size
-            return jsonify({
-                "available": True,
-                "db_path": str(db_path),
-                "total_documents": total,
-                "size_mb": round(size_bytes / 1048576, 1),
-                "last_indexed": last_indexed,
-                "by_source": {r[0]: r[1] for r in sources_row},
-            })
-        except Exception as e:
-            return jsonify({"available": False, "reason": _safe_error(e)})
+        return jsonify(_get_search_health())
 
     return app
 
@@ -2848,6 +3142,7 @@ body {
 
 <div class="tabs">
   <div class="tab active" data-tab="dashboard">Dashboard</div>
+  <div class="tab" data-tab="observatory">Observatory</div>
   <div class="tab" data-tab="sources">Sources</div>
   <div class="tab" data-tab="edge">Edge Sync</div>
   <div class="tab" data-tab="docs">Docs</div>
@@ -2856,6 +3151,7 @@ body {
 <div class="content">
   <div id="config-banner"></div>
   <div class="tab-content active" id="tab-dashboard"></div>
+  <div class="tab-content" id="tab-observatory"></div>
   <div class="tab-content" id="tab-sources"></div>
   <div class="tab-content" id="tab-edge"></div>
   <div class="tab-content" id="tab-docs"></div>
@@ -2892,6 +3188,7 @@ let consumersData = null;
 let appConfig = {};
 let searchHealth = null;
 let edgeStatus = null;
+let observatoryData = null;
 let openSourceName = null;
 
 const SOURCE_ICONS = {
@@ -2933,6 +3230,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     const target = tab.getAttribute('data-tab');
     document.getElementById('tab-' + target).classList.add('active');
     if (target === 'dashboard') renderDashboard();
+    if (target === 'observatory') renderObservatory();
     if (target === 'sources') renderSourcesPage();
     if (target === 'edge') renderEdgePage();
     if (target === 'docs') renderDocsPage();
@@ -3156,6 +3454,12 @@ async function fetchEdgeStatus() {
   } catch(e) { edgeStatus = null; }
 }
 
+async function fetchObservatory() {
+  try {
+    observatoryData = await apiFetch('/api/observatory');
+  } catch(e) { observatoryData = null; console.error('fetchObservatory', e); }
+}
+
 async function fetchDaemon() {
   try {
     const data = await apiFetch('/api/daemon');
@@ -3186,12 +3490,13 @@ async function toggleDaemon() {
 }
 
 async function refresh() {
-  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchEdgeStatus()]);
+  await Promise.all([fetchSources(), fetchRuns(), fetchConfig(), fetchDaemon(), fetchEdgeStatus(), fetchObservatory()]);
   updateHeaderStats();
   const activeTab = document.querySelector('.tab.active');
   if (activeTab) {
     const target = activeTab.getAttribute('data-tab');
     if (target === 'dashboard') renderDashboard();
+    else if (target === 'observatory') renderObservatory();
     else if (target === 'sources') renderSourcesPage();
     else if (target === 'edge') renderEdgePage();
   }
@@ -3200,6 +3505,7 @@ async function refresh() {
     if (!activeTab) return;
     const target = activeTab.getAttribute('data-tab');
     if (target === 'dashboard') renderDashboard();
+    else if (target === 'observatory') renderObservatory();
     else if (target === 'sources') renderSourcesPage();
   });
 }
@@ -3234,6 +3540,141 @@ async function createConfig() {
       showToast('Failed to create config', 'error');
     }
   } catch(e) { showToast(e.message, 'error'); }
+}
+
+function statusBadge(status) {
+  const s = status || 'unknown';
+  const cls = s === 'healthy' ? 'badge-green' : s === 'degraded' ? 'badge-yellow' : s === 'broken' ? 'badge-red' : 'badge-gray';
+  return '<span class="badge ' + cls + '">' + escHtml(s) + '</span>';
+}
+
+function statusColor(status) {
+  if (status === 'healthy') return 'var(--green)';
+  if (status === 'degraded') return 'var(--yellow)';
+  if (status === 'broken') return 'var(--red)';
+  return 'var(--text3)';
+}
+
+function renderObservatory() {
+  const el = document.getElementById('tab-observatory');
+  const d = observatoryData;
+  if (!d) {
+    el.innerHTML = '<div class="empty"><p>Loading Observatory...</p></div>';
+    return;
+  }
+
+  const subsystems = d.subsystems || [];
+  const sources = (d.sources && d.sources.items) || [];
+  const edge = d.edge || {};
+  const localAgent = edge.local_agent || {};
+  const klava = d.klava || {};
+  const queues = d.queues || {};
+  const recentErrors = d.recent_errors || [];
+
+  let html = '';
+  html += '<div class="panel" style="border-color:' + statusColor(d.status) + '">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap">';
+  html += '<div><div style="font-size:12px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Vadimgest Observatory</div>';
+  html += '<div style="font-size:30px;font-weight:700;color:' + statusColor(d.status) + '">' + escHtml((d.status || 'unknown').toUpperCase()) + '</div>';
+  html += '<div style="font-size:13px;color:var(--text2);margin-top:6px">Last updated ' + timeAgo(d.generated_at) + '</div></div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:10px;min-width:min(100%,420px)">';
+  html += '<div class="kpi"><div class="kpi-val">' + fmtNum((d.sources || {}).enabled || 0) + '</div><div class="kpi-label">Enabled Sources</div></div>';
+  html += '<div class="kpi"><div class="kpi-val">' + fmtNum(localAgent.pending_total || 0) + '</div><div class="kpi-label">Edge Pending</div></div>';
+  html += '<div class="kpi"><div class="kpi-val">' + fmtNum(queues.pending_total || 0) + '</div><div class="kpi-label">Queue Pending</div></div>';
+  html += '</div></div></div>';
+
+  html += '<div class="kpi-row">';
+  subsystems.forEach(s => {
+    html += '<div class="kpi" style="border-top:3px solid ' + statusColor(s.status) + '">';
+    html += '<div class="kpi-val" style="font-size:14px;color:' + statusColor(s.status) + '">' + escHtml(s.status || 'unknown') + '</div>';
+    html += '<div class="kpi-label">' + escHtml(s.label || s.key) + '</div></div>';
+  });
+  html += '</div>';
+
+  html += '<div class="panel"><div class="panel-title">Server Hub</div><table class="runs-table"><tbody>';
+  html += '<tr><td>Dashboard</td><td>' + statusBadge((d.server || {}).status) + '</td><td>' + escHtml((d.server || {}).data_dir || '') + '</td></tr>';
+  html += '<tr><td>Config</td><td>' + escHtml((d.server || {}).config_file || 'not found') + '</td><td></td></tr>';
+  html += '<tr><td>Sync daemon</td><td>' + statusBadge(((d.server || {}).daemon || {}).status) + '</td><td>' + ((((d.server || {}).daemon || {}).running) ? 'running since ' + timeAgo(((d.server || {}).daemon || {}).started_at) : 'not running / unknown') + '</td></tr>';
+  html += '</tbody></table></div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">';
+  html += '<div class="panel"><div class="panel-title">Edge Devices</div>';
+  html += '<div style="display:grid;gap:8px;margin-bottom:12px">';
+  html += '<div>Server sees edge: ' + statusBadge(edge.server_can_see_edge ? 'healthy' : 'unknown') + '</div>';
+  html += '<div>Edge reaches server: ' + statusBadge(edge.edge_can_reach_server === true ? 'healthy' : edge.edge_can_reach_server === false ? 'broken' : 'unknown') + '</div>';
+  html += '<div>Local agent: ' + statusBadge(localAgent.status) + ' <span style="color:var(--text3);font-size:12px">' + escHtml(localAgent.device_id || '') + '</span></div></div>';
+  if ((edge.tokens || []).length) {
+    html += '<table class="runs-table"><thead><tr><th>Device</th><th>Last seen</th><th>Status</th></tr></thead><tbody>';
+    (edge.tokens || []).forEach(t => {
+      html += '<tr><td>' + escHtml(t.label || t.id) + '</td><td>' + timeAgo(t.last_seen_at) + '</td><td>' + statusBadge(t.status) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty"><p>No edge tokens registered.</p></div>';
+  }
+  if ((localAgent.sources || []).length) {
+    html += '<div class="category-label" style="margin-top:14px">Local pending</div><table class="runs-table"><thead><tr><th>Source</th><th>Total</th><th>Uploaded</th><th>Pending</th></tr></thead><tbody>';
+    (localAgent.sources || []).forEach(s => {
+      html += '<tr><td>' + escHtml(s.source) + '</td><td>' + fmtNum(s.total) + '</td><td>' + fmtNum(s.uploaded_line) + '</td><td>' + fmtNum(s.pending) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+  html += '</div>';
+
+  html += '<div class="panel"><div class="panel-title">Search</div><div style="display:grid;gap:8px">';
+  html += '<div>Status: ' + statusBadge((d.search || {}).status) + '</div>';
+  html += '<div>Documents: <b>' + fmtNum((d.search || {}).total_documents || 0) + '</b></div>';
+  html += '<div>Last indexed: ' + escHtml((d.search || {}).last_indexed || 'never') + '</div>';
+  html += '<div style="font-size:12px;color:var(--text3);word-break:break-all">' + escHtml((d.search || {}).db_path || (d.search || {}).reason || '') + '</div>';
+  html += '</div></div></div>';
+
+  html += '<div class="panel"><div class="panel-title">Sources</div>';
+  if (sources.length) {
+    html += '<table class="runs-table"><thead><tr><th>Source</th><th>Status</th><th>Records</th><th>Last Sync</th><th>Where</th><th>Detail</th></tr></thead><tbody>';
+    sources.filter(s => s.enabled || s.status !== 'healthy').sort((a,b) => {
+      const order = {broken:0,degraded:1,unknown:2,healthy:3};
+      return (order[a.status] || 4) - (order[b.status] || 4);
+    }).slice(0, 30).forEach(s => {
+      html += '<tr><td>' + escHtml(s.display_name || s.name) + '</td><td>' + statusBadge(s.status) + '</td><td>' + fmtNum(s.records) + '</td><td>' + timeAgo(s.last_sync || s.last_data) + '</td><td>' + escHtml(s.where || '') + '</td><td>' + escHtml(s.reason || '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty"><p>No source telemetry.</p></div>';
+  }
+  html += '</div>';
+
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px">';
+  html += '<div class="panel"><div class="panel-title">Queues</div><div style="display:grid;gap:8px">';
+  html += '<div>Status: ' + statusBadge(queues.status) + '</div><div>Consumers: <b>' + fmtNum((queues.consumers || []).length) + '</b></div><div>Pending records: <b>' + fmtNum(queues.pending_total || 0) + '</b></div></div>';
+  if (queues.totals) {
+    html += '<table class="runs-table" style="margin-top:12px"><thead><tr><th>Consumer</th><th>Pending</th><th>Updated</th></tr></thead><tbody>';
+    Object.keys(queues.totals).forEach(c => {
+      html += '<tr><td>' + escHtml(c) + '</td><td>' + fmtNum(queues.totals[c]) + '</td><td>' + timeAgo((queues.updated || {})[c]) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+  html += '</div>';
+
+  html += '<div class="panel"><div class="panel-title">Klava Processing</div><div style="display:grid;gap:8px">';
+  html += '<div>Status: ' + statusBadge(klava.status) + '</div><div>Reachable: <b>' + (klava.reachable ? 'yes' : 'no') + '</b></div>';
+  html += '<div>Health score: <b>' + escHtml(klava.health_score == null ? 'unknown' : klava.health_score) + '</b></div>';
+  html += '<div>Services down: <b>' + fmtNum(((klava.services || {}).down) || 0) + '</b></div><div>Failing jobs: <b>' + fmtNum(((klava.cron || {}).failing) || 0) + '</b></div>';
+  if (klava.error) html += '<div style="color:var(--red);font-size:12px">' + escHtml(klava.error) + '</div>';
+  html += '<div style="font-size:12px;color:var(--text3);word-break:break-all">' + escHtml(klava.url || '') + '</div></div></div></div>';
+
+  html += '<div class="panel"><div class="panel-title">Recent Failures</div>';
+  if (recentErrors.length) {
+    html += '<table class="runs-table"><thead><tr><th>When</th><th>Source</th><th>Error</th></tr></thead><tbody>';
+    recentErrors.forEach(e => {
+      html += '<tr><td>' + timeAgo(e.ts) + '</td><td>' + escHtml(e.source || '') + '</td><td>' + escHtml(e.error || '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<div class="empty"><p>No recent failures.</p></div>';
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
 }
 
 // ---- Sources Tab ----
@@ -3871,6 +4312,7 @@ function renderDocsPage() {
     ['GET', '/api/runs', 'Recent sync history'],
     ['GET', '/api/consumers', 'Consumer checkpoint positions'],
     ['GET', '/api/queues', 'Queue depths per source per consumer'],
+    ['GET', '/api/observatory', 'Unified health for vadimgest, edge devices, search, queues, and Klava'],
     ['GET', '/api/config', 'Current config and data directory'],
     ['POST', '/api/config/init', 'Initialize config file'],
     ['PUT', '/api/credentials', 'Save environment variables'],
@@ -6604,6 +7046,12 @@ refresh().then(() => {
   showToast('Init error: ' + e.message, 'error');
   console.error('Init error', e);
 });
+setInterval(() => {
+  const activeTab = document.querySelector('.tab.active');
+  if (activeTab && activeTab.getAttribute('data-tab') === 'observatory') {
+    refresh();
+  }
+}, 30000);
 </script>
 </body>
 </html>"""

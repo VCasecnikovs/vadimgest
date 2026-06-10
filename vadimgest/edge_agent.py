@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import sys
 import tempfile
 import threading
@@ -57,6 +58,9 @@ class EdgeRunResult:
     ok: bool = True
     device_id: str = ""
     server_url: str = ""
+    hostname: str = ""
+    started_at: str = ""
+    finished_at: str = ""
     sources: list[EdgeSourceResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +68,9 @@ class EdgeRunResult:
             "ok": self.ok and not any(s.error for s in self.sources),
             "device_id": self.device_id,
             "server_url": self.server_url,
+            "hostname": self.hostname,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
             "sources": [s.to_dict() for s in self.sources],
         }
 
@@ -170,6 +177,22 @@ class EdgeAgent:
             "updated_at": _now(),
         }
 
+    def _set_run_state(self, state: dict[str, Any], result: EdgeRunResult):
+        payload = result.to_dict()
+        state["last_run"] = {
+            **payload,
+            "selected_sources": self.selected_sources(),
+            "pending_total": sum(s.get("pending", 0) for s in payload["sources"]),
+            "uploaded_total": sum(s.get("uploaded", 0) for s in payload["sources"]),
+            "skipped_total": sum(s.get("skipped", 0) for s in payload["sources"]),
+            "failed_total": sum(s.get("failed", 0) for s in payload["sources"]),
+            "errors": [
+                {"source": s["source"], "error": s["error"]}
+                for s in payload["sources"]
+                if s.get("error")
+            ],
+        }
+
     def _sync_source(self, source: str) -> tuple[int, str | None]:
         cls = get_syncer_class(source)
         if cls is None:
@@ -225,48 +248,55 @@ class EdgeAgent:
         result = EdgeRunResult(
             device_id=self.config.get("device_id") or "",
             server_url=self.config.get("server_url") or "",
+            hostname=socket.gethostname(),
+            started_at=_now(),
         )
 
         batch_size = max(1, int(self.config.get("batch_size") or 100))
-        for source in self.selected_sources():
-            source_result = EdgeSourceResult(source=source)
-            synced, sync_error = self._sync_source(source)
-            source_result.synced = synced
-            if sync_error:
-                source_result.error = sync_error
-                result.ok = False
+        try:
+            for source in self.selected_sources():
+                source_result = EdgeSourceResult(source=source)
+                synced, sync_error = self._sync_source(source)
+                source_result.synced = synced
+                if sync_error:
+                    source_result.error = sync_error
+                    result.ok = False
+                    result.sources.append(source_result)
+                    continue
+
+                checkpoint = self._get_checkpoint(state, source)
+                total = self.store.count(source)
+                source_result.pending = max(0, total - checkpoint)
+                next_line = checkpoint + 1
+
+                try:
+                    while next_line <= total:
+                        end_line = min(total, next_line + batch_size - 1)
+                        records = list(self.store.read_range(source, next_line, end_line))
+                        if not records:
+                            break
+                        accepted, skipped, failed, prefix, _ = self._upload_batch(source, records)
+                        source_result.uploaded += accepted
+                        source_result.skipped += skipped
+                        source_result.failed += failed
+                        if prefix <= 0:
+                            break
+                        checkpoint = records[prefix - 1]._line
+                        self._set_checkpoint(state, source, checkpoint)
+                        self._save_state(state)
+                        next_line = checkpoint + 1
+                        if failed:
+                            break
+                except Exception as e:
+                    source_result.error = str(e)
+                    result.ok = False
+
+                source_result.checkpoint = checkpoint
                 result.sources.append(source_result)
-                continue
-
-            checkpoint = self._get_checkpoint(state, source)
-            total = self.store.count(source)
-            source_result.pending = max(0, total - checkpoint)
-            next_line = checkpoint + 1
-
-            try:
-                while next_line <= total:
-                    end_line = min(total, next_line + batch_size - 1)
-                    records = list(self.store.read_range(source, next_line, end_line))
-                    if not records:
-                        break
-                    accepted, skipped, failed, prefix, _ = self._upload_batch(source, records)
-                    source_result.uploaded += accepted
-                    source_result.skipped += skipped
-                    source_result.failed += failed
-                    if prefix <= 0:
-                        break
-                    checkpoint = records[prefix - 1]._line
-                    self._set_checkpoint(state, source, checkpoint)
-                    self._save_state(state)
-                    next_line = checkpoint + 1
-                    if failed:
-                        break
-            except Exception as e:
-                source_result.error = str(e)
-                result.ok = False
-
-            source_result.checkpoint = checkpoint
-            result.sources.append(source_result)
+        finally:
+            result.finished_at = _now()
+            self._set_run_state(state, result)
+            self._save_state(state)
 
         return result
 

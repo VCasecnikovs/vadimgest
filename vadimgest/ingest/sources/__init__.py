@@ -39,6 +39,7 @@ _SYNCER_REGISTRY = {
     "dayflow": (".dayflow.syncer", "DayflowSyncer"),
     "obsidian": (".obsidian.syncer", "ObsidianSyncer"),
     "claude": (".claude.syncer", "ClaudeSyncer"),
+    "codex": (".codex.syncer", "CodexSyncer"),
     "github": (".github.syncer", "GitHubSyncer"),
     "gmail": (".gmail.syncer", "GmailSyncer"),
     "gtasks": (".gtasks.syncer", "GTasksSyncer"),

@@ -104,37 +104,30 @@ class ClaudeSyncer(CronSyncer):
         if not session_file.exists():
             return None
 
-        # Parse messages from JSONL (user messages only - skip assistant/tool noise)
+        # Parse meaningful transcript facts without storing hidden reasoning or
+        # huge tool output. Keep the record session-shaped for existing readers.
         messages = []
+        tool_calls = []
+        errors = []
+        first_line = None
+        assistant_count = 0
         try:
             with open(session_file) as f:
-                for line in f:
+                for line_no, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         msg = json.loads(line)
-                        if msg.get("type") != "user":
-                            continue
-
-                        content = msg.get("message", {}).get("content", "")
-                        if isinstance(content, list):
-                            texts = []
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    texts.append(block.get("text", ""))
-                                elif isinstance(block, str):
-                                    texts.append(block)
-                            content = "\n".join(texts)
-
-                        # Skip empty (tool results have no text blocks)
-                        if not content.strip():
-                            continue
-
-                        messages.append({
-                            "role": "user",
-                            "content": content[:5000],
-                        })
+                        if first_line is None:
+                            first_line = line_no
+                        parsed = self._parse_message_line(msg, line_no)
+                        if parsed.get("message"):
+                            messages.append(parsed["message"])
+                            if parsed["message"]["role"] == "assistant":
+                                assistant_count += 1
+                        tool_calls.extend(parsed.get("tool_calls", []))
+                        errors.extend(parsed.get("errors", []))
 
                     except json.JSONDecodeError:
                         pass
@@ -142,7 +135,7 @@ class ClaudeSyncer(CronSyncer):
             self.log(f"Error reading session {session_id}: {e}")
             return None
 
-        if not messages:
+        if not any(m.get("role") == "user" for m in messages):
             return None
 
         # Extract first prompt as title
@@ -160,14 +153,101 @@ class ClaudeSyncer(CronSyncer):
             "modified_at": modified_at.isoformat() if modified_at else None,
             "project_path": session_info["project_path"],
             "git_branch": entry.get("gitBranch"),
+            "source_uri": f"file://{session_file}#L{first_line or 1}",
             "messages": messages,
+            "tool_calls": tool_calls,
+            "errors": errors,
             "meta": {
                 "session_id": session_id,
                 "message_count": len(messages),
+                "assistant_message_count": assistant_count,
+                "tool_call_count": len(tool_calls),
+                "error_count": len(errors),
                 "original_message_count": entry.get("messageCount", 0),
                 "is_sidechain": entry.get("isSidechain", False),
+                "source_file": str(session_file),
             },
         }
+
+    def _parse_message_line(self, msg: dict, line_no: int) -> dict:
+        """Extract user/assistant text and compact tool metadata from one JSONL row."""
+        row_type = msg.get("type")
+        message = msg.get("message") if isinstance(msg.get("message"), dict) else {}
+        content = message.get("content", "")
+        parsed = {"message": None, "tool_calls": [], "errors": []}
+
+        if row_type == "user":
+            text, tool_errors = self._content_to_text(content, include_tool_result_errors=True)
+            if text.strip():
+                parsed["message"] = {
+                    "role": "user",
+                    "content": text[:5000],
+                    "line": line_no,
+                }
+            parsed["errors"].extend(tool_errors)
+            return parsed
+
+        if row_type == "assistant":
+            text, tool_calls = self._assistant_content(content, line_no)
+            if text.strip():
+                parsed["message"] = {
+                    "role": "assistant",
+                    "content": text[:5000],
+                    "line": line_no,
+                }
+            parsed["tool_calls"].extend(tool_calls)
+            return parsed
+
+        if row_type in {"result", "error"}:
+            err = msg.get("error") or msg.get("message") or msg.get("result")
+            if err:
+                parsed["errors"].append(str(err)[:1000])
+            return parsed
+
+        return parsed
+
+    def _content_to_text(self, content, include_tool_result_errors: bool = False) -> tuple[str, list[str]]:
+        errors = []
+        if isinstance(content, str):
+            return content, errors
+        if not isinstance(content, list):
+            return "", errors
+        texts = []
+        for block in content:
+            if isinstance(block, str):
+                texts.append(block)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    texts.append(block.get("text", ""))
+                elif include_tool_result_errors and btype == "tool_result" and block.get("is_error"):
+                    tool_text, _ = self._content_to_text(block.get("content", ""))
+                    if tool_text.strip():
+                        errors.append(tool_text[:1000])
+        return "\n".join(t for t in texts if t), errors
+
+    def _assistant_content(self, content, line_no: int) -> tuple[str, list[dict]]:
+        if isinstance(content, str):
+            return content, []
+        if not isinstance(content, list):
+            return "", []
+        texts = []
+        tools = []
+        for block in content:
+            if isinstance(block, str):
+                texts.append(block)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    texts.append(block.get("text", ""))
+                elif btype == "tool_use":
+                    tools.append({
+                        "name": block.get("name") or "tool",
+                        "id": block.get("id"),
+                        "line": line_no,
+                        "input_summary": str(block.get("input") or "")[:500],
+                    })
+        return "\n".join(t for t in texts if t), tools
 
     def _parse_ts(self, ts) -> datetime | None:
         """Parse timestamp."""

@@ -179,7 +179,7 @@ def get_source_config(source_name: str) -> dict:
     merged = {**defaults, **source_cfg}
 
     # Expand path values
-    for key in ("vault_path", "cache_path", "db_path", "projects_dir",
+    for key in ("vault_path", "cache_path", "db_path", "projects_dir", "codex_dir",
                 "session_file", "legacy_db", "browser_data_dir", "media_dir"):
         if key in merged and isinstance(merged[key], str):
             merged[key] = _expand_path(merged[key])
@@ -271,6 +271,17 @@ _SOURCE_DEFAULTS = {
         "enabled": False,
         "mode": "cron",
         "schedule": "0 * * * *",
+    },
+    "codex": {
+        "enabled": False,
+        "mode": "cron",
+        "schedule": "0 * * * *",
+        "codex_dir": "~/.codex",
+        "include_archived": True,
+        "include_sqlite_metadata": True,
+        "max_user_chars": 8000,
+        "max_assistant_chars": 8000,
+        "max_tool_output_chars": 1200,
     },
     "github": {
         "enabled": False,

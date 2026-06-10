@@ -1,6 +1,6 @@
 # vadimgest
 
-Your digital life in one place. Syncs messages, emails, meetings, notes, browsing history, and code sessions from 19 sources into a single searchable archive.
+Your digital life in one place. Syncs messages, emails, meetings, notes, browsing history, and agent sessions from 21 sources into a single searchable archive.
 
 No cloud. No subscriptions. Everything stays on your machine.
 
@@ -10,9 +10,9 @@ No cloud. No subscriptions. Everything stays on your machine.
 
 ## What it does
 
-vadimgest pulls data from the tools you already use and stores it locally as append-only JSONL files. A built-in search index lets you find anything across all sources instantly.
+vadimgest is a personal source-of-truth event lake and search layer. It pulls data from the tools you already use, stores source-backed records as append-only JSONL, and powers Klava, Obsidian enrichment, reflection, heartbeat, and recall. A built-in search index lets you find anything across all sources instantly.
 
-**19 sources supported:**
+**21 sources supported:**
 
 | Messages | Productivity | Code & Work | Media |
 |----------|-------------|-------------|-------|
@@ -21,8 +21,10 @@ vadimgest pulls data from the tools you already use and stores it locally as app
 | WhatsApp | Google Tasks | Claude Sessions | LinkedIn |
 | iMessage | Google Drive | Obsidian Notes | |
 | | Nextcloud | Granola Meetings | |
+| | | Codex Sessions | |
 | | | Dayflow Activity | |
 | | | Hlopya Meetings | |
+| | | Slack | |
 
 ## Quick start
 
@@ -97,6 +99,16 @@ If you prefer running them yourself:
 vadimgest serve --no-open --port 8484 &
 vadimgest daemon --interval 300 &
 ```
+
+## vadimgest edge
+
+`vadimgest edge` is the local privacy boundary collector. Run it on a laptop or workstation that has access to local-only data, normalize records there, then push those records to the server hub. Bakeneko should store and process the lake; it should not pull laptop files directly.
+
+- **Server hub** - search, storage, dashboards, Klava processing, source manifests.
+- **Edge agent** - local source access, privacy controls, push status, Mac-only data.
+- **Source manifests** - what each source collects, auth needed, last sync, record count, and freshness.
+
+High-value edge sources include iMessage, Apple Notes, Reminders, Contacts, Calendar local cache, screenshots/OCR metadata, browser history, downloads/bookmarks, local app usage, and local agent histories.
 
 ## Search
 
@@ -226,9 +238,9 @@ pip install playwright && playwright install chromium
 ```
 Sources          vadimgest sync          Storage            Search
  Telegram   -->                    -->  JSONL files   -->  SQLite FTS5
- Signal     -->    19 syncers          (append-only)      350K+ docs
+ Signal     -->    21 syncers          (append-only)      350K+ docs
  Gmail      -->    cron / daemon        one per source     <50ms queries
- ...19 total -->                   -->                -->
+ ...21 total -->                   -->                -->
 ```
 
 Each source has a syncer that knows how to pull new data. Syncers run on a schedule (cron mode) or continuously (daemon mode). Data is written as append-only JSONL - records are never modified or deleted.

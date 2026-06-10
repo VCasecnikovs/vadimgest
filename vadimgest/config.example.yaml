@@ -63,6 +63,17 @@ claude:
   schedule: "0 * * * *"
   # projects_dir: ~/.claude/projects
 
+codex:
+  enabled: false
+  mode: cron
+  schedule: "0 * * * *"
+  # codex_dir: ~/.codex
+  include_archived: true
+  include_sqlite_metadata: true
+  max_user_chars: 8000
+  max_assistant_chars: 8000
+  max_tool_output_chars: 1200
+
 github:
   enabled: false
   mode: cron

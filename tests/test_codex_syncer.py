@@ -73,6 +73,46 @@ def test_codex_syncer_enriches_sqlite_thread_metadata(tmp_path):
     assert metadata["parents"]["thr_1"] == ["parent_1"]
 
 
+def test_codex_syncer_normalizes_epoch_sqlite_timestamps(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"
+    _write_jsonl(session, [
+        {"type": "session_meta", "payload": {"id": "thr_1"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn_1"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Hi"}},
+    ])
+
+    db = codex_dir / "state_5.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        "create table threads (id text, created_at integer, updated_at integer, source text, "
+        "model_provider text, cwd text, title text, git_branch text, model text, "
+        "thread_source text, preview text)"
+    )
+    con.execute(
+        "insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("thr_1", 1781049600, 1781049720, "vscode",
+         "openai", "/repo", "Thread title", "main", "gpt-5.5", "user", "preview"),
+    )
+    con.execute("create table thread_spawn_edges (parent_thread_id text, child_thread_id text)")
+    con.commit()
+    con.close()
+
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {"codex_dir": str(codex_dir)})
+    record = syncer._records_from_session_file(session, syncer._load_metadata())[0]
+
+    assert record["created_at"] == "2026-06-10T00:00:00+00:00"
+    assert record["updated_at"] == "2026-06-10T00:02:00+00:00"
+
+
+def test_codex_syncer_parses_numeric_state_timestamp(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {"codex_dir": str(codex_dir)})
+
+    assert syncer._parse_ts(1781049600).isoformat() == "2026-06-10T00:00:00+00:00"
+    assert syncer._parse_ts("1781049600").isoformat() == "2026-06-10T00:00:00+00:00"
+
+
 def test_codex_syncer_dedups_by_stable_turn_id(tmp_path):
     codex_dir = tmp_path / ".codex"
     session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"

@@ -253,8 +253,10 @@ class CodexSyncer(CronSyncer):
         session_id = session_meta.get("session_id") or path.stem
         thread_meta = metadata.get("threads", {}).get(session_id, {})
         turn_id = turn.get("turn_id") or f"line_{turn['start_line']}"
-        created_at = turn.get("started_at") or session_meta.get("created_at") or thread_meta.get("created_at")
-        updated_at = thread_meta.get("updated_at") or self._mtime_iso(path)
+        created_at = self._coerce_ts(
+            turn.get("started_at") or session_meta.get("created_at") or thread_meta.get("created_at")
+        )
+        updated_at = self._coerce_ts(thread_meta.get("updated_at")) or self._mtime_iso(path)
         title = self._title(turn, session_meta, thread_meta)
         cwd = turn["context"].get("cwd") or session_meta.get("cwd") or thread_meta.get("cwd")
         git_branch = turn["context"].get("git_branch") or thread_meta.get("git_branch")
@@ -444,16 +446,34 @@ class CodexSyncer(CronSyncer):
         except (TypeError, ValueError, OSError, OverflowError):
             return None
 
+    def _coerce_ts(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return self._epoch_to_iso(value)
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            return self._epoch_to_iso(float(s))
+        except ValueError:
+            return s
+
     def _parse_ts(self, ts) -> datetime | None:
         if not ts:
             return None
         if isinstance(ts, datetime):
             return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        if isinstance(ts, (int, float)):
+            return self._epoch_to_iso(ts) and datetime.fromtimestamp(float(ts), tz=timezone.utc)
         try:
             dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except Exception:
-            return None
+            try:
+                return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+            except (TypeError, ValueError, OSError, OverflowError):
+                return None
 
 
 if __name__ == "__main__":

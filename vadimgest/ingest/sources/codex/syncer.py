@@ -56,13 +56,14 @@ class CodexSyncer(CronSyncer):
         last_ts = self._parse_ts(state.last_ts)
         metadata = self._load_metadata() if self.include_sqlite_metadata else {}
         files = self._session_files()
+        seen_files = self._seen_session_filenames() if last_ts else set()
         yielded = 0
 
         for session_file in files:
             if yielded >= limit:
                 break
             modified = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
-            if last_ts and modified <= last_ts:
+            if last_ts and modified <= last_ts and session_file.name in seen_files:
                 continue
             for record in self._records_from_session_file(session_file, metadata):
                 if yielded >= limit:
@@ -83,6 +84,22 @@ class CodexSyncer(CronSyncer):
             if archived.exists():
                 files.extend(archived.glob("*.jsonl"))
         return sorted(set(files), key=lambda p: p.stat().st_mtime)
+
+    def _seen_session_filenames(self) -> set[str]:
+        """Return transcript filenames already represented in the raw codex store."""
+        names: set[str] = set()
+        source_file = self.store.sources_dir / f"{self.source_name}.jsonl"
+        if not source_file.exists():
+            return names
+        for _, row in self._iter_jsonl(source_file):
+            rec = row.get("data") if isinstance(row.get("data"), dict) else row
+            source_uri = str(rec.get("source_uri") or "")
+            if not source_uri.startswith("file://"):
+                continue
+            path_part = source_uri[7:].split("#", 1)[0]
+            if path_part:
+                names.add(Path(path_part).name)
+        return names
 
     def _records_from_session_file(self, path: Path, metadata: dict[str, Any] | None = None) -> list[dict]:
         metadata = metadata or {}
@@ -117,6 +134,13 @@ class CodexSyncer(CronSyncer):
             top_type = raw.get("type")
             payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
 
+            if not top_type and raw.get("id") and raw.get("timestamp"):
+                session_meta.update(self._session_meta(raw))
+                continue
+
+            if raw.get("record_type") == "state":
+                continue
+
             if top_type == "session_meta":
                 session_meta.update(self._session_meta(payload))
                 continue
@@ -138,6 +162,14 @@ class CodexSyncer(CronSyncer):
                 turn = ensure_turn(str(payload.get("turn_id") or ""), line_no)
                 turn["started_at"] = self._epoch_to_iso(payload.get("started_at"))
                 turn["context"]["model_context_window"] = payload.get("model_context_window")
+                continue
+
+            if top_type in {"message", "function_call", "function_call_output", "reasoning"}:
+                if top_type == "reasoning":
+                    continue
+                turn = ensure_turn(str(payload.get("turn_id") or "") if payload.get("turn_id") else None, line_no)
+                turn["end_line"] = line_no
+                self._consume_response_item(turn, payload, tool_calls_by_id)
                 continue
 
             turn = ensure_turn(str(payload.get("turn_id") or "") if payload.get("turn_id") else None, line_no)
@@ -424,7 +456,11 @@ class CodexSyncer(CronSyncer):
 
     def _looks_like_codex_context(self, text: str) -> bool:
         stripped = text.lstrip()
-        return stripped.startswith("# AGENTS.md instructions") or stripped.startswith("<permissions instructions>")
+        return (
+            stripped.startswith("# AGENTS.md instructions")
+            or stripped.startswith("<permissions instructions>")
+            or stripped.startswith("<environment_context>")
+        )
 
     def _looks_like_error(self, output: str) -> bool:
         lowered = output.lower()

@@ -1,7 +1,9 @@
 """Tests for Codex session ingestion."""
 
 import json
+import os
 import sqlite3
+from datetime import datetime, timezone
 
 from vadimgest.ingest.sources.codex.syncer import CodexSyncer
 from vadimgest.models import SourceState
@@ -138,6 +140,39 @@ def test_codex_syncer_dedups_by_stable_turn_id(tmp_path):
     assert records[0].data["id"] == "codex_thr_1_turn_1_2"
 
 
+def test_codex_syncer_extracts_legacy_top_level_rows(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    session = codex_dir / "archived_sessions" / "rollout-2025-09-03T18-25-49-legacy.jsonl"
+    _write_jsonl(session, [
+        {"id": "legacy", "timestamp": "2025-09-03T18:25:49.259Z", "git": {"branch": "main"}},
+        {"record_type": "state"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>\nignored\n</environment_context>"}]},
+        {"record_type": "state"},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Real historical prompt"}]},
+        {"type": "reasoning", "encrypted_content": "SECRET-REASONING"},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Historical answer"}]},
+        {"type": "function_call", "name": "shell", "call_id": "call_1", "arguments": "{\"command\":\"ls\"}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "{\"output\":\"ok\"}"},
+    ])
+
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {
+        "codex_dir": str(codex_dir),
+        "include_archived": True,
+        "include_sqlite_metadata": False,
+    })
+
+    records = syncer._records_from_session_file(session)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["id"] == "codex_legacy_line_3_3"
+    assert record["created_at"] == "2025-09-03T18:25:49.259Z"
+    assert record["user_messages"] == [{"text": "Real historical prompt", "line": 5, "images": 0}]
+    assert record["assistant_messages"][0]["text"] == "Historical answer"
+    assert record["tool_calls"][0]["name"] == "shell"
+    assert "SECRET-REASONING" not in json.dumps(record)
+
+
 def test_fetch_new_ignores_session_index_jsonl(tmp_path):
     codex_dir = tmp_path / ".codex"
     _write_jsonl(codex_dir / "sessions" / "index" / "by-dir" / "repo.jsonl", [
@@ -150,3 +185,55 @@ def test_fetch_new_ignores_session_index_jsonl(tmp_path):
     })
 
     assert list(syncer.fetch_new(SourceState(), limit=10)) == []
+
+
+def test_fetch_new_backfills_old_unseen_archived_sessions(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    archived = codex_dir / "archived_sessions" / "rollout-2025-09-03T18-25-49-old.jsonl"
+    _write_jsonl(archived, [
+        {"type": "session_meta", "payload": {"id": "old"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn_1"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Historical prompt"}},
+    ])
+    old_mtime = datetime(2025, 9, 3, 18, 25, 49, tzinfo=timezone.utc).timestamp()
+    os.utime(archived, (old_mtime, old_mtime))
+
+    store = DataStore(tmp_path / "store")
+    syncer = CodexSyncer(store, {
+        "codex_dir": str(codex_dir),
+        "include_archived": True,
+        "include_sqlite_metadata": False,
+    })
+    state = SourceState(last_ts=datetime(2026, 6, 15, tzinfo=timezone.utc).isoformat())
+
+    records = list(syncer.fetch_new(state, limit=10))
+
+    assert len(records) == 1
+    assert records[0]["id"] == "codex_old_turn_1_2"
+
+
+def test_fetch_new_skips_old_archived_sessions_once_seen(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    archived = codex_dir / "archived_sessions" / "rollout-2025-09-03T18-25-49-old.jsonl"
+    _write_jsonl(archived, [
+        {"type": "session_meta", "payload": {"id": "old"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn_1"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "Historical prompt"}},
+    ])
+    old_mtime = datetime(2025, 9, 3, 18, 25, 49, tzinfo=timezone.utc).timestamp()
+    os.utime(archived, (old_mtime, old_mtime))
+
+    store = DataStore(tmp_path / "store")
+    store.append("codex", {
+        "id": "codex_old_turn_1_2",
+        "source_uri": f"file://{archived}#L2",
+        "updated_at": "2025-09-03T18:25:49+00:00",
+    })
+    syncer = CodexSyncer(store, {
+        "codex_dir": str(codex_dir),
+        "include_archived": True,
+        "include_sqlite_metadata": False,
+    })
+    state = SourceState(last_ts=datetime(2026, 6, 15, tzinfo=timezone.utc).isoformat())
+
+    assert list(syncer.fetch_new(state, limit=10)) == []

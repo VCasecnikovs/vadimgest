@@ -173,6 +173,79 @@ def test_codex_syncer_extracts_legacy_top_level_rows(tmp_path):
     assert "SECRET-REASONING" not in json.dumps(record)
 
 
+def test_codex_syncer_compresses_before_truncating(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"
+    long_prompt = "raw-long-message " * 50
+    _write_jsonl(session, [
+        {"type": "session_meta", "payload": {"id": "thr_1"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn_1"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": long_prompt}},
+    ])
+
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {
+        "codex_dir": str(codex_dir),
+        "include_archived": False,
+        "include_sqlite_metadata": False,
+        "compress_long_messages": True,
+        "compression_min_chars": 1,
+        "max_user_chars": 20,
+    })
+
+    class Result:
+        messages = [{"role": "user", "content": "compressed prompt"}]
+        tokens_before = 100
+        tokens_after = 10
+        tokens_saved = 90
+        compression_ratio = 0.9
+        transforms_applied = ["test"]
+
+    seen = {}
+
+    def fake_compress(messages):
+        seen["content"] = messages[0]["content"]
+        return Result()
+
+    syncer._compress_messages_with_headroom = fake_compress
+
+    record = syncer._records_from_session_file(session)[0]
+
+    assert seen["content"] == long_prompt.strip()
+    assert record["user_messages"][0]["text"] == "compressed prompt"
+    assert record["meta"]["compression"]["compressed_messages"] == 1
+    assert record["meta"]["compression"]["tokens_saved"] == 90
+
+
+def test_codex_syncer_compression_failure_falls_back_to_truncation(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"
+    long_prompt = "raw-long-message " * 50
+    _write_jsonl(session, [
+        {"type": "session_meta", "payload": {"id": "thr_1"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn_1"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": long_prompt}},
+    ])
+
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {
+        "codex_dir": str(codex_dir),
+        "include_archived": False,
+        "include_sqlite_metadata": False,
+        "compress_long_messages": True,
+        "compression_min_chars": 1,
+        "max_user_chars": 20,
+    })
+
+    def broken_compress(messages):
+        raise RuntimeError("headroom unavailable")
+
+    syncer._compress_messages_with_headroom = broken_compress
+
+    record = syncer._records_from_session_file(session)[0]
+
+    assert record["user_messages"][0]["text"] == long_prompt[:20] + "\n[truncated]"
+    assert "RuntimeError: headroom unavailable" in record["meta"]["compression"]["error"]
+
+
 def test_fetch_new_ignores_session_index_jsonl(tmp_path):
     codex_dir = tmp_path / ".codex"
     _write_jsonl(codex_dir / "sessions" / "index" / "by-dir" / "repo.jsonl", [

@@ -31,6 +31,8 @@ class CodexSyncer(CronSyncer):
         "codex_dir": {"type": "path", "default": "~/.codex", "description": "Path to Codex home directory", "advanced": True, "auto_detected": True},
         "include_archived": {"type": "bool", "default": True, "description": "Include archived_sessions JSONL transcripts", "advanced": True},
         "include_sqlite_metadata": {"type": "bool", "default": True, "description": "Read thread and goal metadata from Codex SQLite state", "advanced": True},
+        "compress_long_messages": {"type": "bool", "default": False, "description": "Compress long user/assistant messages before final truncation", "advanced": True},
+        "compression_min_chars": {"type": "int", "default": 12000, "description": "Minimum turn text size before compression is attempted", "advanced": True},
         "max_user_chars": {"type": "int", "default": 8000, "description": "Maximum characters stored per user message", "advanced": True},
         "max_assistant_chars": {"type": "int", "default": 8000, "description": "Maximum characters stored per assistant message", "advanced": True},
         "max_tool_output_chars": {"type": "int", "default": 1200, "description": "Maximum characters stored per tool output summary", "advanced": True},
@@ -43,6 +45,8 @@ class CodexSyncer(CronSyncer):
         self.codex_dir = Path(config.get("codex_dir") or Path.home() / ".codex").expanduser()
         self.include_archived = bool(config.get("include_archived", True))
         self.include_sqlite_metadata = bool(config.get("include_sqlite_metadata", True))
+        self.compress_long_messages = bool(config.get("compress_long_messages", False))
+        self.compression_min_chars = int(config.get("compression_min_chars") or 12000)
         self.max_user_chars = int(config.get("max_user_chars") or 8000)
         self.max_assistant_chars = int(config.get("max_assistant_chars") or 8000)
         self.max_tool_output_chars = int(config.get("max_tool_output_chars") or 1200)
@@ -192,7 +196,7 @@ class CodexSyncer(CronSyncer):
             text = str(payload.get("message") or "").strip()
             if text:
                 turn["user_messages"].append({
-                    "text": self._truncate(text, self.max_user_chars),
+                    "text": text,
                     "line": turn["end_line"],
                     "images": len(payload.get("images") or []) + len(payload.get("local_images") or []),
                 })
@@ -200,7 +204,7 @@ class CodexSyncer(CronSyncer):
             text = str(payload.get("message") or "").strip()
             if text:
                 turn["assistant_messages"].append({
-                    "text": self._truncate(text, self.max_assistant_chars),
+                    "text": text,
                     "phase": payload.get("phase"),
                     "line": turn["end_line"],
                 })
@@ -212,7 +216,7 @@ class CodexSyncer(CronSyncer):
             text = str(payload.get("last_agent_message") or "").strip()
             if text:
                 turn["assistant_messages"].append({
-                    "text": self._truncate(text, self.max_assistant_chars),
+                    "text": text,
                     "phase": "final",
                     "line": turn["end_line"],
                 })
@@ -235,13 +239,13 @@ class CodexSyncer(CronSyncer):
                 return
             if role == "assistant":
                 turn["assistant_messages"].append({
-                    "text": self._truncate(text, self.max_assistant_chars),
+                    "text": text,
                     "phase": payload.get("phase"),
                     "line": turn["end_line"],
                 })
             elif role == "user" and not self._looks_like_codex_context(text):
                 turn["user_messages"].append({
-                    "text": self._truncate(text, self.max_user_chars),
+                    "text": text,
                     "line": turn["end_line"],
                     "images": 0,
                 })
@@ -282,6 +286,9 @@ class CodexSyncer(CronSyncer):
         if not (turn["user_messages"] or turn["assistant_messages"] or turn["tool_calls"] or turn["errors"]):
             return None
 
+        compression_meta = self._compress_turn_messages(turn)
+        self._truncate_turn_messages(turn)
+
         session_id = session_meta.get("session_id") or path.stem
         thread_meta = metadata.get("threads", {}).get(session_id, {})
         turn_id = turn.get("turn_id") or f"line_{turn['start_line']}"
@@ -293,6 +300,19 @@ class CodexSyncer(CronSyncer):
         cwd = turn["context"].get("cwd") or session_meta.get("cwd") or thread_meta.get("cwd")
         git_branch = turn["context"].get("git_branch") or thread_meta.get("git_branch")
         model = turn["context"].get("model") or thread_meta.get("model")
+
+        meta = {
+            "source_file": str(path),
+            "start_line": turn["start_line"],
+            "end_line": turn["end_line"],
+            "originator": session_meta.get("originator"),
+            "cli_version": session_meta.get("cli_version"),
+            "model_provider": session_meta.get("model_provider") or thread_meta.get("model_provider"),
+            "source": session_meta.get("source") or thread_meta.get("source"),
+            "thread_source": session_meta.get("thread_source") or thread_meta.get("thread_source"),
+        }
+        if compression_meta:
+            meta["compression"] = compression_meta
 
         return {
             "id": f"codex_{session_id}_{turn_id}_{turn['start_line']}",
@@ -316,16 +336,7 @@ class CodexSyncer(CronSyncer):
             "parent_thread_ids": metadata.get("parents", {}).get(session_id, []),
             "child_thread_ids": metadata.get("children", {}).get(session_id, []),
             "goals": metadata.get("goals", {}).get(session_id, []),
-            "meta": {
-                "source_file": str(path),
-                "start_line": turn["start_line"],
-                "end_line": turn["end_line"],
-                "originator": session_meta.get("originator"),
-                "cli_version": session_meta.get("cli_version"),
-                "model_provider": session_meta.get("model_provider") or thread_meta.get("model_provider"),
-                "source": session_meta.get("source") or thread_meta.get("source"),
-                "thread_source": session_meta.get("thread_source") or thread_meta.get("thread_source"),
-            },
+            "meta": meta,
         }
 
     def _load_metadata(self) -> dict[str, Any]:
@@ -453,6 +464,78 @@ class CodexSyncer(CronSyncer):
             seen.add(key)
             out.append(msg)
         return out
+
+    def _truncate_turn_messages(self, turn: dict[str, Any]) -> None:
+        for msg in turn["user_messages"]:
+            msg["text"] = self._truncate(str(msg.get("text") or ""), self.max_user_chars)
+        for msg in turn["assistant_messages"]:
+            msg["text"] = self._truncate(str(msg.get("text") or ""), self.max_assistant_chars)
+
+    def _compress_turn_messages(self, turn: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.compress_long_messages:
+            return None
+
+        refs: list[dict[str, Any]] = []
+        messages: list[dict[str, str]] = []
+        for key, role in (("user_messages", "user"), ("assistant_messages", "assistant")):
+            for msg in turn[key]:
+                text = str(msg.get("text") or "")
+                if not text:
+                    continue
+                refs.append(msg)
+                messages.append({"role": role, "content": text})
+
+        raw_chars = sum(len(msg["content"]) for msg in messages)
+        meta: dict[str, Any] = {
+            "provider": "headroom",
+            "raw_chars": raw_chars,
+            "min_chars": self.compression_min_chars,
+        }
+        if raw_chars < self.compression_min_chars:
+            meta["skipped"] = "below_min_chars"
+            return meta
+
+        try:
+            result = self._compress_messages_with_headroom(messages)
+        except Exception as e:
+            meta["error"] = f"{type(e).__name__}: {str(e)[:200]}"
+            return meta
+
+        compressed_messages = getattr(result, "messages", result)
+        if not isinstance(compressed_messages, list) or len(compressed_messages) != len(refs):
+            meta["error"] = "compressor returned unexpected message shape"
+            return meta
+
+        changed = 0
+        compressed_chars = 0
+        for ref, compressed in zip(refs, compressed_messages):
+            content = compressed.get("content") if isinstance(compressed, dict) else None
+            text = str(content or "")
+            if text and len(text) < len(str(ref.get("text") or "")):
+                ref["text"] = text
+                changed += 1
+            compressed_chars += len(str(ref.get("text") or ""))
+
+        meta.update({
+            "compressed_messages": changed,
+            "compressed_chars": compressed_chars,
+            "tokens_before": getattr(result, "tokens_before", None),
+            "tokens_after": getattr(result, "tokens_after", None),
+            "tokens_saved": getattr(result, "tokens_saved", None),
+            "compression_ratio": getattr(result, "compression_ratio", None),
+            "transforms_applied": getattr(result, "transforms_applied", None),
+        })
+        return meta
+
+    def _compress_messages_with_headroom(self, messages: list[dict[str, str]]) -> Any:
+        from headroom import CompressConfig, compress
+
+        config = CompressConfig(
+            compress_user_messages=True,
+            protect_recent=0,
+            min_tokens_to_compress=250,
+        )
+        return compress(messages, config=config)
 
     def _looks_like_codex_context(self, text: str) -> bool:
         stripped = text.lstrip()

@@ -413,7 +413,7 @@ class CodexSyncer(CronSyncer):
 
     def _iter_jsonl(self, path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8", errors="replace") as f:
                 for line_no, line in enumerate(f, 1):
                     if not line.strip():
                         continue

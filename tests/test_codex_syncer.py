@@ -173,6 +173,29 @@ def test_codex_syncer_extracts_legacy_top_level_rows(tmp_path):
     assert "SECRET-REASONING" not in json.dumps(record)
 
 
+def test_codex_syncer_tolerates_invalid_utf8_bytes(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"
+    session.parent.mkdir(parents=True, exist_ok=True)
+    session.write_bytes(
+        b'{"type":"session_meta","payload":{"id":"thr_1"}}\n'
+        b'{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn_1"}}\n'
+        b'{"type":"event_msg","payload":{"type":"user_message","message":"bad '
+        b'\xe2 byte"}}\n'
+    )
+
+    syncer = CodexSyncer(DataStore(tmp_path / "store"), {
+        "codex_dir": str(codex_dir),
+        "include_archived": False,
+        "include_sqlite_metadata": False,
+    })
+
+    records = syncer._records_from_session_file(session)
+
+    assert len(records) == 1
+    assert records[0]["user_messages"][0]["text"] == "bad � byte"
+
+
 def test_codex_syncer_compresses_before_truncating(tmp_path):
     codex_dir = tmp_path / ".codex"
     session = codex_dir / "sessions" / "2026" / "06" / "10" / "rollout.jsonl"

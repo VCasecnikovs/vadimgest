@@ -20,8 +20,6 @@ def get_db(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
-    # Allow up to 30s for write locks held by vadimgest serve or other writers
-    conn.execute("PRAGMA busy_timeout = 30000")
 
     # Check schema version
     conn.execute("CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT)")
@@ -324,13 +322,19 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
     except Exception:
         pass
 
-    # Only embed --md sources (obsidian + skills), not JSONL
-    rows = conn.execute("""
+    # Embed obsidian + skills by default; extend to JSONL sources if embed_sources specified
+    # Default: obsidian + skills (small, high-signal)
+    # Extended: also hlopya, granola, signal for semantic search over meetings/conversations
+    _default_embed_sources = ('obsidian', 'skills')
+    _extended_embed_sources = ('obsidian', 'skills', 'hlopya', 'granola', 'signal', 'bee')
+    _active_sources = _extended_embed_sources if getattr(embedder, 'extended_sources', False) else _default_embed_sources
+    placeholders = ','.join('?' * len(_active_sources))
+    rows = conn.execute(f"""
         SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
         FROM docs JOIN meta ON docs.path = meta.path
-        WHERE docs.source IN ('obsidian', 'skills')
+        WHERE docs.source IN ({placeholders})
         ORDER BY docs.rowid
-    """).fetchall()
+    """, _active_sources).fetchall()
 
     to_embed = []
     for rowid, path, source, content, old_hash in rows:

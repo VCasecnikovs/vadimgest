@@ -3198,6 +3198,7 @@ const SOURCE_ICONS = {
   obsidian: '\\uD83D\\uDCDD', gdrive: '\\u2601\\uFE0F', nextcloud: '\\u2601\\uFE0F',
   browser: '\\uD83C\\uDF10', dayflow: '\\u23F1\\uFE0F', claude: '\\uD83E\\uDD16',
   granola: '\\uD83C\\uDF99\\uFE0F', hlopya: '\\uD83C\\uDF99\\uFE0F',
+  bee: '\\uD83D\\uDC1D',
   linkedin: '\\uD83D\\uDCBC', xnews: '\\uD83D\\uDCF0',
 };
 const CAT_ICONS = {

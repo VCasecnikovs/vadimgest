@@ -179,8 +179,9 @@ def get_source_config(source_name: str) -> dict:
     merged = {**defaults, **source_cfg}
 
     # Expand path values
-    for key in ("vault_path", "cache_path", "db_path", "projects_dir", "codex_dir",
-                "session_file", "legacy_db", "browser_data_dir", "media_dir"):
+    for key in ("vault_path", "cache_path", "db_path", "projects_dir",
+                "session_file", "legacy_db", "browser_data_dir", "media_dir",
+                "native_db_path", "attachments_dir"):
         if key in merged and isinstance(merged[key], str):
             merged[key] = _expand_path(merged[key])
 
@@ -244,11 +245,22 @@ _SOURCE_DEFAULTS = {
         "ocr_images": False,
         "ocr_lang": "eng",
         "max_image_bytes": 8000000,
+        "index_non_image_media": True,
     },
     "signal": {
         "enabled": False,
         "mode": "cron",
         "schedule": "*/15 * * * *",
+        "include_attachment_paths": True,
+        "attachment_summary": True,
+    },
+    "bee": {
+        "enabled": False,
+        "mode": "cron",
+        "schedule": "*/15 * * * *",
+        "bee_bin": "/srv/codex-klava/data/bee-npm/node_modules/.bin/bee",
+        "sync_dir": "~/.local/share/vadimgest/bee-sync",
+        "recent_days": 7,
     },
     "granola": {
         "enabled": False,
@@ -271,17 +283,6 @@ _SOURCE_DEFAULTS = {
         "enabled": False,
         "mode": "cron",
         "schedule": "0 * * * *",
-    },
-    "codex": {
-        "enabled": False,
-        "mode": "cron",
-        "schedule": "0 * * * *",
-        "codex_dir": "~/.codex",
-        "include_archived": True,
-        "include_sqlite_metadata": True,
-        "max_user_chars": 8000,
-        "max_assistant_chars": 8000,
-        "max_tool_output_chars": 1200,
     },
     "github": {
         "enabled": False,
@@ -315,11 +316,17 @@ _SOURCE_DEFAULTS = {
         "schedule": "*/15 * * * *",
         "fetch_limit": 50,
         "chat_limit": 50,
+        "native_enabled": True,
+        "native_batch_size": 10000,
+        "native_include_contacts": True,
+        "native_include_calls": True,
+        "native_db_path": "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared",
     },
     "imessage": {
         "enabled": False,
         "mode": "cron",
         "schedule": "*/15 * * * *",
+        "include_attachments": True,
     },
     "browser": {
         "enabled": False,
@@ -386,7 +393,20 @@ _SOURCE_DEFAULTS = {
         "bootstrap_days": 7,
         "page_size": 100,
         "max_channels": 200,
-        "include_threads": False,
+        "include_threads": True,
+        "include_file_metadata": True,
+    },
+    "discord": {
+        "enabled": False,
+        "mode": "cron",
+        "schedule": "*/15 * * * *",
+        "token": "${DISCORD_TOKEN}",
+        "guild_ids": [],
+        "channel_ids": [],
+        "bootstrap_days": 7,
+        "page_size": 100,
+        "max_channels": 200,
+        "include_attachments": True,
     },
 }
 

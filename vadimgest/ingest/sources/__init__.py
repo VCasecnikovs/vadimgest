@@ -33,13 +33,13 @@ __all__ = [
 
 # Registry: source name -> (module_path, class_name)
 _SYNCER_REGISTRY = {
+    "bee": (".bee.syncer", "BeeSyncer"),
     "telegram": (".telegram.syncer", "TelegramSyncer"),
     "signal": (".signal.syncer", "SignalSyncer"),
     "granola": (".granola.syncer", "GranolaSyncer"),
     "dayflow": (".dayflow.syncer", "DayflowSyncer"),
     "obsidian": (".obsidian.syncer", "ObsidianSyncer"),
     "claude": (".claude.syncer", "ClaudeSyncer"),
-    "codex": (".codex.syncer", "CodexSyncer"),
     "github": (".github.syncer", "GitHubSyncer"),
     "gmail": (".gmail.syncer", "GmailSyncer"),
     "gtasks": (".gtasks.syncer", "GTasksSyncer"),
@@ -54,6 +54,7 @@ _SYNCER_REGISTRY = {
     "xnews": (".xnews.syncer", "XNewsSyncer"),
     "hlopya": (".hlopya.syncer", "HlopyaSyncer"),
     "slack": (".slack.syncer", "SlackSyncer"),
+    "discord": (".discord.syncer", "DiscordSyncer"),
 }
 
 # Cache of loaded syncer classes

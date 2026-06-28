@@ -1951,6 +1951,35 @@ body {
   font-weight: 600;
   gap: 8px;
 }
+.panel-title .panel-meta {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text3);
+  font-weight: 400;
+}
+.quiet-toggle {
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text3);
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.quiet-toggle:hover {
+  color: var(--text);
+  border-color: var(--border-hover);
+}
+.loaded-empty {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 18px;
+  color: var(--text3);
+  font-size: 13px;
+}
 
 /* ---- Source Cards (Klava-style) ---- */
 .src-grid {
@@ -3347,6 +3376,7 @@ let searchHealth = null;
 let edgeStatus = null;
 let observatoryData = null;
 let openSourceName = null;
+let dashboardShowNoisySources = false;
 
 const SOURCE_ICONS = {
   telegram: '\\u2708\\uFE0F', signal: '\\uD83D\\uDD12', whatsapp: '\\uD83D\\uDCAC', imessage: '\\uD83D\\uDCF1',
@@ -3852,6 +3882,11 @@ function getSourceStatus(s) {
   return 'disabled';
 }
 
+function toggleDashboardSourceNoise() {
+  dashboardShowNoisySources = !dashboardShowNoisySources;
+  renderDashboard();
+}
+
 function renderDashboard() {
   const el = document.getElementById('tab-dashboard');
   const daemonDot = document.getElementById('daemon-dot');
@@ -3865,6 +3900,18 @@ function renderDashboard() {
     totalRecords += s.records || 0;
     if (s.enabled && s.ready && s.ready.ok) activeCount++;
   });
+  const sortedSources = [...sourcesData].sort((a, b) => {
+    const loadedA = (a.records || 0) > 0 || (a.edge_records || 0) > 0;
+    const loadedB = (b.records || 0) > 0 || (b.edge_records || 0) > 0;
+    if (loadedA !== loadedB) return loadedA ? -1 : 1;
+    const statusOrder = {active: 0, 'needs-setup': 1, unavailable: 2, disabled: 3};
+    const sa = statusOrder[getSourceStatus(a)] || 3;
+    const sb = statusOrder[getSourceStatus(b)] || 3;
+    if (sa !== sb) return sa - sb;
+    return (b.records || 0) - (a.records || 0);
+  });
+  const loadedSources = sortedSources.filter(s => (s.records || 0) > 0 || (s.edge_records || 0) > 0);
+  const quietSources = sortedSources.filter(s => (s.records || 0) <= 0 && (s.edge_records || 0) <= 0);
 
   let html = '';
 
@@ -3895,7 +3942,7 @@ function renderDashboard() {
   // KPI row
   html += '<div class="kpi-row">';
   html += '<div class="kpi"><div class="kpi-val">' + fmtNum(totalRecords) + '</div><div class="kpi-label">Total Records</div></div>';
-  html += '<div class="kpi"><div class="kpi-val">' + sourcesData.length + '</div><div class="kpi-label">Sources</div></div>';
+  html += '<div class="kpi"><div class="kpi-val">' + loadedSources.length + '</div><div class="kpi-label">Loaded Sources</div></div>';
   html += '<div class="kpi"><div class="kpi-val" style="color:var(--green)">' + activeCount + '</div><div class="kpi-label">Active</div></div>';
   if (daemonRunning) {
     html += '<div class="kpi"><div class="kpi-val" style="color:var(--green);font-size:14px">Syncing</div><div class="kpi-label">Daemon</div></div>';
@@ -3911,28 +3958,34 @@ function renderDashboard() {
   html += '</div>';
 
   // Source cards in panel
+  const visibleSources = dashboardShowNoisySources ? sortedSources : loadedSources;
+  const hiddenQuietCount = dashboardShowNoisySources ? 0 : quietSources.length;
   html += '<div class="panel">';
-  html += '<div class="panel-title">Sources</div>';
+  html += '<div class="panel-title"><span>Loaded in vadimgest</span>';
+  html += '<span class="panel-meta">' + loadedSources.length + ' loaded';
+  if (hiddenQuietCount > 0) html += ' &middot; ' + hiddenQuietCount + ' hidden empty/setup';
+  html += '</span>';
+  if (quietSources.length > 0) {
+    html += '<button class="quiet-toggle" onclick="event.stopPropagation();toggleDashboardSourceNoise()">';
+    html += dashboardShowNoisySources ? 'Hide empty/setup sources' : 'Show empty/setup sources (' + quietSources.length + ')';
+    html += '</button>';
+  }
+  html += '</div>';
   html += '<div style="display:flex;gap:16px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:12px;flex-wrap:wrap">';
-  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot active"></span>Active</span>';
-  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot warn"></span>Needs setup</span>';
-  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Disabled</span>';
-  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Unavailable</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot active"></span>Ready collector</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot warn"></span>Loaded but needs setup</span>';
   html += '<span style="display:flex;align-items:center;gap:4px"><span class="badge badge-green">edge</span>Received from edge</span>';
   html += '<span style="display:flex;align-items:center;gap:4px"><span class="badge badge-gray">main</span>Main collector</span>';
   html += '</div>';
+  if (!visibleSources.length) {
+    html += '<div class="loaded-empty">No loaded records yet.</div>';
+    html += '</div>';
+  } else {
   html += '<div class="src-grid">';
   const latestBySourceDash = {};
   [...runsData].reverse().forEach(r => { if (!latestBySourceDash[r.source]) latestBySourceDash[r.source] = r; });
-  const sorted = [...sourcesData].sort((a, b) => {
-    const statusOrder = {active: 0, 'needs-setup': 1, unavailable: 2, disabled: 3};
-    const sa = statusOrder[getSourceStatus(a)] || 3;
-    const sb = statusOrder[getSourceStatus(b)] || 3;
-    if (sa !== sb) return sa - sb;
-    return (b.records || 0) - (a.records || 0);
-  });
-  const maxRec = Math.max(...sorted.map(s => s.records || 0));
-  sorted.forEach(s => {
+  const maxRec = Math.max(1, ...visibleSources.map(s => s.records || 0));
+  visibleSources.forEach(s => {
     const status = getSourceStatus(s);
     const isActive = status === 'active';
     const isWarn = status === 'needs-setup';
@@ -3961,15 +4014,18 @@ function renderDashboard() {
     const syncFailedDash = latestRunDash && latestRunDash.status === 'error';
     if (s.records > 0) {
       html += '<div class="src-bar"><div class="src-bar-fill" style="width:' + barPct + '%"></div></div>';
-      html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
+      html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>last record ' + timeAgo(syncTimeDash) + '</span></div>';
     } else {
-      html += '<div class="src-stats"><span>No data</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
+      html += '<div class="src-stats"><span>not loaded</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
     }
-    html += '<div class="src-stats" style="margin-top:4px"><span>' + fmtNum(s.edge_records || 0) + ' edge records</span><span>edge ' + timeAgo(s.edge_last_ts) + '</span></div>';
+    if ((s.edge_records || 0) > 0 || dashboardShowNoisySources) {
+      html += '<div class="src-stats" style="margin-top:4px"><span>' + fmtNum(s.edge_records || 0) + ' edge records</span><span>edge last ' + timeAgo(s.edge_last_ts) + '</span></div>';
+    }
     if (syncFailedDash) html += '<div style="font-size:11px;color:var(--red);margin-top:2px">Last sync failed: ' + escHtml(latestRunDash.error || 'unknown error') + '</div>';
     html += '</div>';
   });
   html += '</div></div>';
+  }
 
   // Source health bar in panel
   html += '<div class="panel" style="margin-top:0">';

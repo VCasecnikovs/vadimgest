@@ -336,6 +336,10 @@ class TestAPIGet:
         resp = client.get("/")
         html = resp.get_data(as_text=True)
 
+        assert "Loaded in vadimgest" in html
+        assert "Loaded Sources" in html
+        assert "Show empty/setup sources" in html
+        assert "last record" in html
         assert "edge records" in html
         assert "Received from edge" in html
         assert "Main collector" in html

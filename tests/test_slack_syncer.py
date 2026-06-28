@@ -1,4 +1,5 @@
 import json
+import urllib.parse
 import urllib.request
 from io import BytesIO
 from unittest.mock import patch
@@ -47,6 +48,8 @@ def test_check_ready_accepts_config_token(tmp_path):
 
 
 def test_fetch_new_converts_slack_messages(slack_syncer):
+    history_params = []
+
     def fake_urlopen(req, timeout=30):
         url = req.full_url
         if "conversations.list" in url:
@@ -56,6 +59,7 @@ def test_fetch_new_converts_slack_messages(slack_syncer):
                 "response_metadata": {"next_cursor": ""},
             })
         if "conversations.history" in url:
+            history_params.append(urllib.parse.parse_qs(urllib.parse.urlparse(url).query))
             return _FakeResponse({
                 "ok": True,
                 "messages": [{
@@ -84,3 +88,4 @@ def test_fetch_new_converts_slack_messages(slack_syncer):
     assert rec["sender"] == "Vadim"
     assert rec["text"] == "hello from Slack"
     assert rec["timestamp"] == "2024-03-09T16:00:00.000100+00:00"
+    assert history_params[0]["oldest"][0].isdigit()

@@ -408,6 +408,19 @@ _SOURCE_DEFAULTS = {
         "max_channels": 200,
         "include_attachments": True,
     },
+    "codex": {
+        "enabled": False,
+        "mode": "cron",
+        "schedule": "0 * * * *",
+        "codex_dir": "~/.codex",
+        "include_archived": True,
+        "include_sqlite_metadata": True,
+        "compress_long_messages": False,
+        "compression_min_chars": 12000,
+        "max_user_chars": 8000,
+        "max_assistant_chars": 8000,
+        "max_tool_output_chars": 1200,
+    },
 }
 
 

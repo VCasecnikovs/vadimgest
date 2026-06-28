@@ -410,7 +410,7 @@ def create_app(store: DataStore | None = None) -> Flask:
             age = _hours_old(last_seen, now=now)
             reason = ""
             if not src.get("enabled"):
-                status = "healthy"
+                status = "disabled"
                 reason = "disabled"
             elif src.get("ready") and not src["ready"].get("ok", True):
                 status = "broken"
@@ -1592,7 +1592,7 @@ def _render_dashboard() -> str:
   --bg: #09090b;
   --bg2: #18181b;
   --bg3: #27272a;
-  --border: #27272a;
+  --border: #2e2e33;
   --border-hover: #3f3f46;
   --text: #fafafa;
   --text2: #a1a1aa;
@@ -1601,6 +1601,7 @@ def _render_dashboard() -> str:
   --accent-hover: #6ee7b7;
   --accent-glow: rgba(52,211,153,0.12);
   --accent2: #a78bfa;
+  --accent-fg: #fff;
   --green: #34d399;
   --yellow: #fbbf24;
   --red: #f87171;
@@ -1627,6 +1628,7 @@ def _render_dashboard() -> str:
   --accent-hover: #059669;
   --accent-glow: transparent;
   --accent2: #8b5cf6;
+  --accent-fg: #fff;
   --green: #10b981;
   --yellow: #f59e0b;
   --red: #ef4444;
@@ -1639,6 +1641,7 @@ def _render_dashboard() -> str:
 }
 
 * { margin:0; padding:0; box-sizing:border-box; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg);
@@ -1740,11 +1743,11 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #555;
+  background: var(--text3);
   transition: background 0.2s;
 }
 .daemon-dot.running {
-  background: #4ade80;
+  background: var(--green);
 }
 
 /* ---- Tabs ---- */
@@ -1773,7 +1776,7 @@ body {
 }
 
 /* ---- Content ---- */
-.content { padding: 28px 36px; max-width: 1440px; }
+.content { padding: 28px 36px; max-width: 1440px; margin: 0 auto; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
@@ -1985,7 +1988,7 @@ body {
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   border-color: var(--accent);
   font-weight: 600;
 }
@@ -1996,7 +1999,7 @@ body {
   font-size: 10px;
   border-radius: 5px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   border: none;
   cursor: pointer;
   font-weight: 500;
@@ -2320,12 +2323,26 @@ body {
 }
 .toggle input:checked + .toggle-track::after {
   transform: translateX(20px);
-  background: #fff;
+  background: var(--accent-fg);
 }
 
 /* Fields */
 .field {
   margin-bottom: 14px;
+}
+.edge-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.panel-subtitle {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text3);
 }
 .field label {
   display: block;
@@ -2438,7 +2455,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-family: JetBrains Mono, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--text2);
   gap: 8px;
@@ -2476,7 +2493,7 @@ body {
   border-radius: 6px;
   padding: 6px 10px;
   color: var(--text);
-  font-family: JetBrains Mono, monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 
@@ -3098,7 +3115,7 @@ body {
 .search-bar button {
   padding: 10px 20px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-fg);
   border: none;
   border-radius: 8px;
   cursor: pointer;
@@ -3107,6 +3124,17 @@ body {
   transition: background 0.15s;
 }
 .search-bar button:hover { background: var(--accent-hover); }
+@media (max-width: 768px) {
+  .header { padding: 12px 16px; flex-wrap: wrap; }
+  .header-stats { flex-wrap: wrap; }
+  .tabs { padding: 0 16px; }
+  .content { padding: 16px; }
+  .stat-boxes { grid-template-columns: 1fr; }
+  .edge-fields-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
 </style>
 </head>
 <body>
@@ -3140,12 +3168,12 @@ body {
   </div>
 </div>
 
-<div class="tabs">
-  <div class="tab active" data-tab="dashboard">Dashboard</div>
-  <div class="tab" data-tab="observatory">Observatory</div>
-  <div class="tab" data-tab="sources">Sources</div>
-  <div class="tab" data-tab="edge">Edge Sync</div>
-  <div class="tab" data-tab="docs">Docs</div>
+<div class="tabs" role="tablist">
+  <div class="tab active" data-tab="dashboard" tabindex="0" role="tab" aria-selected="true">Dashboard</div>
+  <div class="tab" data-tab="observatory" tabindex="0" role="tab" aria-selected="false">Observatory</div>
+  <div class="tab" data-tab="sources" tabindex="0" role="tab" aria-selected="false">Sources</div>
+  <div class="tab" data-tab="edge" tabindex="0" role="tab" aria-selected="false">Edge Sync</div>
+  <div class="tab" data-tab="docs" tabindex="0" role="tab" aria-selected="false">Docs</div>
 </div>
 
 <div class="content">
@@ -3223,19 +3251,22 @@ function toggleTheme() {
 })();
 
 // ---- Tabs ----
+function activateTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  tab.classList.add('active');
+  tab.setAttribute('aria-selected', 'true');
+  const target = tab.getAttribute('data-tab');
+  document.getElementById('tab-' + target).classList.add('active');
+  if (target === 'dashboard') renderDashboard();
+  if (target === 'observatory') renderObservatory();
+  if (target === 'sources') renderSourcesPage();
+  if (target === 'edge') renderEdgePage();
+  if (target === 'docs') renderDocsPage();
+}
 document.querySelectorAll('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    const target = tab.getAttribute('data-tab');
-    document.getElementById('tab-' + target).classList.add('active');
-    if (target === 'dashboard') renderDashboard();
-    if (target === 'observatory') renderObservatory();
-    if (target === 'sources') renderSourcesPage();
-    if (target === 'edge') renderEdgePage();
-    if (target === 'docs') renderDocsPage();
-  });
+  tab.addEventListener('click', () => activateTab(tab));
+  tab.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activateTab(tab); } });
 });
 
 // ---- Formatting ----
@@ -3451,7 +3482,12 @@ async function fetchSearchHealth() {
 
 async function fetchEdgeStatus() {
   try {
-    edgeStatus = await apiFetch('/api/edge/status');
+    const [status, agent] = await Promise.all([
+      apiFetch('/api/edge/status'),
+      apiFetch('/api/edge/agent').catch(() => null),
+    ]);
+    edgeStatus = status;
+    if (edgeStatus && agent != null) edgeStatus.agent_installed = agent.installed;
   } catch(e) { edgeStatus = null; }
 }
 
@@ -3632,7 +3668,7 @@ function renderObservatory() {
   html += '<div class="panel"><div class="panel-title">Sources</div>';
   if (sources.length) {
     html += '<table class="runs-table"><thead><tr><th>Source</th><th>Status</th><th>Records</th><th>Last Sync</th><th>Where</th><th>Detail</th></tr></thead><tbody>';
-    sources.filter(s => s.enabled || s.status !== 'healthy').sort((a,b) => {
+    sources.filter(s => s.enabled || (s.status !== 'healthy' && s.status !== 'disabled')).sort((a,b) => {
       const order = {broken:0,degraded:1,unknown:2,healthy:3};
       return (order[a.status] || 4) - (order[b.status] || 4);
     }).slice(0, 30).forEach(s => {
@@ -3678,66 +3714,12 @@ function renderObservatory() {
   el.innerHTML = html;
 }
 
-// ---- Sources Tab ----
-function renderSources() {
-  const el = document.getElementById('tab-sources');
-  if (!sourcesData.length) {
-    el.innerHTML = '<div class="empty"><p>No sources registered</p><p style="font-size:12px;color:var(--text3);margin-top:6px">Check <code>vadimgest list</code> on the CLI \u2014 if sources appear there but not here, the web process is using a different config. Refresh this page.</p></div>';
-    return;
-  }
-
-  const categories = {};
-  sourcesData.forEach(s => {
-    const cat = s.category || 'other';
-    if (!categories[cat]) categories[cat] = [];
-    categories[cat].push(s);
-  });
-
-  const catOrder = ['messaging','email','calendar','meetings','dev','activity','files','social','knowledge','other'];
-  let html = '';
-
-  catOrder.forEach(cat => {
-    const items = categories[cat];
-    if (!items || !items.length) return;
-    const catIcon = CAT_ICONS[cat] || '';
-    html += '<div class="category-label">' + catIcon + ' ' + escHtml(cat) + '</div>';
-    html += '<div class="cards-grid">';
-    items.forEach(s => {
-      const badge = getBadge(s);
-      const icon = SOURCE_ICONS[s.name] || '\\uD83D\\uDCE6';
-      html += '<div class="source-card" onclick="openDrawer(\\'' + s.name + '\\')">';
-      html += '<div class="source-card-header">';
-      html += '<span style="display:flex;align-items:center;gap:8px"><span style="font-size:18px">' + icon + '</span><span class="source-card-name">' + escHtml(s.display_name) + '</span></span>';
-      html += badge;
-      html += '</div>';
-      if (s.description) {
-        html += '<div class="source-card-desc">' + escHtml(s.description) + '</div>';
-      }
-      html += '<div class="source-card-footer">';
-      html += '<span class="source-card-records">' + fmtNum(s.records) + ' records</span>';
-      html += '<span class="source-card-time">' + timeAgo(s.last_ts) + '</span>';
-      html += '</div>';
-      html += '</div>';
-    });
-    html += '</div>';
-  });
-  el.innerHTML = html;
-}
-
-function getBadge(s) {
-  if (!s.available) return '<span class="badge badge-gray">unavailable</span>';
-  if (!s.enabled) return '<span class="badge badge-gray">disabled</span>';
-  if (s.ready && s.ready.ok) return '<span class="badge badge-green">ready</span>';
-  if (s.ready && !s.ready.ok) return '<span class="badge badge-yellow">needs setup</span>';
-  return '<span class="badge badge-gray">disabled</span>';
-}
-
 // ---- Dashboard Tab (home) ----
 function getSourceStatus(s) {
-  if (!s.available) return 'disabled';
+  if (!s.available) return 'unavailable';
   if (!s.enabled) return 'disabled';
-  if (s.ready && !s.ready.ok) return 'setup';
-  if (s.ready && s.ready.ok) return 'syncing';
+  if (s.ready && !s.ready.ok) return 'needs-setup';
+  if (s.ready && s.ready.ok) return 'active';
   return 'disabled';
 }
 
@@ -3752,7 +3734,7 @@ function renderDashboard() {
   let activeCount = 0;
   sourcesData.forEach(s => {
     totalRecords += s.records || 0;
-    if (s.enabled) activeCount++;
+    if (s.enabled && s.ready && s.ready.ok) activeCount++;
   });
 
   let html = '';
@@ -3802,9 +3784,17 @@ function renderDashboard() {
   // Source cards in panel
   html += '<div class="panel">';
   html += '<div class="panel-title">Sources</div>';
+  html += '<div style="display:flex;gap:16px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:12px;flex-wrap:wrap">';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot active"></span>Active</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot warn"></span>Needs setup</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Disabled</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Unavailable</span>';
+  html += '</div>';
   html += '<div class="src-grid">';
+  const latestBySourceDash = {};
+  [...runsData].reverse().forEach(r => { if (!latestBySourceDash[r.source]) latestBySourceDash[r.source] = r; });
   const sorted = [...sourcesData].sort((a, b) => {
-    const statusOrder = {syncing: 0, setup: 1, error: 2, disabled: 3};
+    const statusOrder = {active: 0, 'needs-setup': 1, unavailable: 2, disabled: 3};
     const sa = statusOrder[getSourceStatus(a)] || 3;
     const sb = statusOrder[getSourceStatus(b)] || 3;
     if (sa !== sb) return sa - sb;
@@ -3813,25 +3803,34 @@ function renderDashboard() {
   const maxRec = Math.max(...sorted.map(s => s.records || 0));
   sorted.forEach(s => {
     const status = getSourceStatus(s);
-    const isActive = s.enabled && status === 'syncing';
-    const isWarn = s.enabled && status === 'setup';
+    const isActive = status === 'active';
+    const isWarn = status === 'needs-setup';
+    const isUnavail = status === 'unavailable';
     const dotCls = isActive ? 'active' : isWarn ? 'warn' : 'off';
-    const badgeLbl = isActive ? 'Active' : isWarn ? 'Setup' : s.enabled ? 'Error' : 'Off';
+    const badgeLbl = isActive ? 'Active' : isWarn ? 'Needs setup' : isUnavail ? 'Unavailable' : 'Disabled';
+    const badgeTitle = isUnavail ? 'Python package not installed'
+      : !s.enabled ? 'Collector is turned off - toggle Enabled to start syncing. Existing data is kept.'
+      : isWarn ? ((s.ready && s.ready.missing) || []).join(', ')
+      : '';
     const cardCls = 'src-card' + (!s.enabled ? ' disabled' : '') + (isWarn ? ' warn' : '');
     const barPct = s.records > 0 ? Math.max(3, Math.min(100, (s.records / (maxRec || 1)) * 100)) : 0;
-    html += '<div class="' + cardCls + '" onclick="openDrawer(\\'' + s.name + '\\')">';
+    html += '<div class="' + cardCls + '" onclick="openDrawer(\\'' + s.name + '\\')" tabindex="0" role="button" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();openDrawer(\\'' + s.name + '\\')}">';
     html += '<div class="src-header">';
     html += '<span class="src-dot ' + dotCls + '"></span>';
     html += '<span class="src-name">' + escHtml(s.display_name) + '</span>';
-    html += '<span class="src-badge ' + dotCls + '">' + badgeLbl + '</span>';
+    html += '<span class="src-badge ' + dotCls + '" title="' + escHtml(badgeTitle) + '">' + badgeLbl + '</span>';
     html += '</div>';
     if (s.description) html += '<div class="src-desc">' + escHtml(s.description) + '</div>';
+    const latestRunDash = latestBySourceDash[s.name];
+    const syncTimeDash = latestRunDash ? latestRunDash.ts : s.last_ts;
+    const syncFailedDash = latestRunDash && latestRunDash.status === 'error';
     if (s.records > 0) {
       html += '<div class="src-bar"><div class="src-bar-fill" style="width:' + barPct + '%"></div></div>';
-      html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>' + timeAgo(s.last_ts) + '</span></div>';
+      html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
     } else {
-      html += '<div class="src-stats"><span>No data</span></div>';
+      html += '<div class="src-stats"><span>No data</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
     }
+    if (syncFailedDash) html += '<div style="font-size:11px;color:var(--red);margin-top:2px">Last sync failed: ' + escHtml(latestRunDash.error || 'unknown error') + '</div>';
     html += '</div>';
   });
   html += '</div></div>';
@@ -4004,28 +4003,41 @@ function renderSourcesPage() {
   if (enabledSources.length > 0) {
     html += '<div class="panel">';
     html += '<div class="panel-title">Enabled Sources</div>';
+    html += '<div style="display:flex;gap:16px;align-items:center;font-size:11px;color:var(--text3);margin-bottom:12px;flex-wrap:wrap">';
+    html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot active"></span>Active</span>';
+    html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot warn"></span>Needs setup</span>';
+    html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Disabled</span>';
+    html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Unavailable</span>';
+    html += '</div>';
     html += '<div class="src-grid">';
+    const latestBySourceSrc = {};
+    [...runsData].reverse().forEach(r => { if (!latestBySourceSrc[r.source]) latestBySourceSrc[r.source] = r; });
     enabledSources.forEach(s => {
       const status = getSourceStatus(s);
-      const isActive = s.enabled && status === 'syncing';
-      const isWarn = s.enabled && status === 'setup';
+      const isActive = status === 'active';
+      const isWarn = status === 'needs-setup';
       const dotCls = isActive ? 'active' : isWarn ? 'warn' : 'off';
-      const badgeLbl = isActive ? 'Active' : isWarn ? 'Setup' : 'Error';
+      const badgeLbl = isActive ? 'Active' : isWarn ? 'Needs setup' : 'Error';
+      const badgeTitleSrc = isWarn ? ((s.ready && s.ready.missing) || []).join(', ') : '';
       const cardCls = 'src-card' + (isWarn ? ' warn' : '');
       const barPct = s.records > 0 ? Math.max(3, Math.min(100, (s.records / (maxRecSrc || 1)) * 100)) : 0;
-      html += '<div class="' + cardCls + '" onclick="openDrawer(\\'' + s.name + '\\')">';
+      const latestRunSrc = latestBySourceSrc[s.name];
+      const syncTimeSrc = latestRunSrc ? latestRunSrc.ts : s.last_ts;
+      const syncFailedSrc = latestRunSrc && latestRunSrc.status === 'error';
+      html += '<div class="' + cardCls + '" onclick="openDrawer(\\'' + s.name + '\\')" tabindex="0" role="button" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();openDrawer(\\'' + s.name + '\\')}">';
       html += '<div class="src-header">';
       html += '<span class="src-dot ' + dotCls + '"></span>';
       html += '<span class="src-name">' + escHtml(s.display_name) + '</span>';
-      html += '<span class="src-badge ' + dotCls + '">' + badgeLbl + '</span>';
+      html += '<span class="src-badge ' + dotCls + '" title="' + escHtml(badgeTitleSrc) + '">' + badgeLbl + '</span>';
       html += '</div>';
       if (s.description) html += '<div class="src-desc">' + escHtml(s.description) + '</div>';
       if (s.records > 0) {
         html += '<div class="src-bar"><div class="src-bar-fill" style="width:' + barPct + '%"></div></div>';
-        html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>' + timeAgo(s.last_ts) + '</span></div>';
+        html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records</span><span>' + timeAgo(syncTimeSrc) + '</span></div>';
       } else {
-        html += '<div class="src-stats"><span>No data</span></div>';
+        html += '<div class="src-stats"><span>No data</span><span>' + timeAgo(syncTimeSrc) + '</span></div>';
       }
+      if (syncFailedSrc) html += '<div style="font-size:11px;color:var(--red);margin-top:2px">Last sync failed: ' + escHtml(latestRunSrc.error || 'unknown error') + '</div>';
       html += '</div>';
     });
     html += '</div></div>';
@@ -4041,14 +4053,21 @@ function renderSourcesPage() {
     html += '<div style="display:none">';
     html += '<div class="panel"><div class="src-grid">';
     disabledSources.forEach(s => {
-      html += '<div class="src-card disabled" onclick="openDrawer(\\'' + s.name + '\\')">';
+      const isUnavailDis = !s.available;
+      const badgeLblDis = isUnavailDis ? 'Unavailable' : 'Disabled';
+      const badgeTitleDis = isUnavailDis ? 'Python package not installed' : 'Collector is turned off - toggle Enabled to start syncing. Existing data is kept.';
+      html += '<div class="src-card disabled" onclick="openDrawer(\\'' + s.name + '\\')" tabindex="0" role="button" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();openDrawer(\\'' + s.name + '\\')}">';
       html += '<div class="src-header">';
       html += '<span class="src-dot off"></span>';
       html += '<span class="src-name">' + escHtml(s.display_name) + '</span>';
-      html += '<span class="src-badge off">Off</span>';
+      html += '<span class="src-badge off" title="' + escHtml(badgeTitleDis) + '">' + badgeLblDis + '</span>';
       html += '</div>';
       if (s.description) html += '<div class="src-desc">' + escHtml(s.description) + '</div>';
-      html += '<div class="src-stats"><span>No data</span></div>';
+      if (s.records > 0) {
+        html += '<div class="src-stats"><span class="highlight">' + fmtNum(s.records) + ' records on disk</span></div>';
+      } else {
+        html += '<div class="src-stats"><span style="color:var(--text3)">No data yet</span></div>';
+      }
       html += '</div>';
     });
     html += '</div></div></div>';
@@ -4096,16 +4115,29 @@ function renderEdgePage() {
   const st = edgeStatus || {};
   const cfg = st.config || {};
   const tokens = st.tokens || [];
+  const agentInstalled = st.agent_installed;
   const sourceSet = new Set(cfg.sources || []);
+  const ingestUrl = st.ingest_url || '';
   let html = '';
 
+  // Explainer + Ingest URL
   html += '<div class="panel">';
-  html += '<div class="panel-title">Server Tokens</div>';
-  html += '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;margin-bottom:12px">';
-  html += '<input id="edge-token-label" placeholder="Device label, e.g. Vadim MacBook" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px">';
+  html += '<div class="panel-title">Edge Sync</div>';
+  html += '<p style="color:var(--text2);font-size:13px;line-height:1.6;margin:0 0 14px">Edge Sync lets a remote device (laptop, phone) push local source data to this server over HTTP. Generate a token below, install the edge agent on the device, and it uploads on a schedule.</p>';
+  html += '<div style="display:flex;align-items:center;gap:10px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px">';
+  html += '<span style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);flex-shrink:0">Ingest URL</span>';
+  html += '<code style="flex:1;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(ingestUrl) + '</code>';
+  html += '<button class="btn btn-sm" onclick="navigator.clipboard.writeText(' + JSON.stringify(ingestUrl) + ').then(()=>showToast(\\'Copied\\',\\'success\\'))" title="Copy ingest URL to clipboard">Copy</button>';
+  html += '</div>';
+  html += '</div>';
+
+  // Device Tokens
+  html += '<div class="panel">';
+  html += '<div class="panel-title">Device Tokens<span class="panel-subtitle">One token per remote device that pushes to this server</span></div>';
+  html += '<div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end;margin-bottom:14px">';
+  html += '<div class="field" style="margin:0"><label>Device label</label><input id="edge-token-label" type="text" placeholder="e.g. MacBook Pro"></div>';
   html += '<button class="btn btn-primary" onclick="edgeCreateToken()">Generate Token</button>';
   html += '</div>';
-  html += '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">Ingest URL: <code style="background:var(--bg3);padding:2px 6px;border-radius:4px">' + escHtml(st.ingest_url || '') + '</code></div>';
   html += '<div id="edge-new-token"></div>';
   if (tokens.length) {
     html += '<table class="runs-table"><thead><tr><th>Label</th><th>Created</th><th>Last seen</th><th>Status</th><th></th></tr></thead><tbody>';
@@ -4120,39 +4152,67 @@ function renderEdgePage() {
     });
     html += '</tbody></table>';
   } else {
-    html += '<div class="empty"><p>No edge tokens yet.</p></div>';
+    html += '<div class="empty"><p>No device tokens yet. Generate one above and install the edge agent on a remote device.</p></div>';
   }
   html += '</div>';
 
+  // Local Edge Agent
+  let agentBadge = '';
+  if (agentInstalled === true) agentBadge = '<span class="badge badge-green">installed</span>';
+  else if (agentInstalled === false) agentBadge = '<span class="badge badge-gray">not installed</span>';
   html += '<div class="panel">';
-  html += '<div class="panel-title">Local Edge Agent</div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">';
-  html += '<div class="field"><label>Server URL</label><input id="edge-server-url" value="' + escHtml(cfg.server_url || '') + '" placeholder="https://server.example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
-  html += '<div class="field"><label>Token</label><input id="edge-token" type="password" placeholder="' + (cfg.token_configured ? 'configured - leave blank to keep' : 'paste generated token') + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
-  html += '<div class="field"><label>Device ID</label><input id="edge-device-id" value="' + escHtml(cfg.device_id || '') + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
-  html += '<div class="field"><label>Interval seconds</label><input id="edge-interval" type="number" min="1" value="' + escHtml(cfg.interval_seconds || 300) + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
-  html += '<div class="field"><label>Batch size</label><input id="edge-batch-size" type="number" min="1" max="1000" value="' + escHtml(cfg.batch_size || 100) + '" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 10px"></div>';
-  html += '</div></div>';
-  html += '<label class="toggle" style="margin:12px 0"><input type="checkbox" id="edge-enabled" ' + (cfg.enabled ? 'checked' : '') + '><span class="toggle-track"></span><span style="margin-left:8px">Edge agent enabled in config</span></label>';
-  html += '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">If no source is selected, the agent uploads all enabled local sources.</div>';
-  html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">';
+  html += '<div class="panel-title">Local Edge Agent' + (agentBadge ? ' ' + agentBadge : '') + '</div>';
+  html += '<p style="color:var(--text2);font-size:12px;margin:0 0 16px">Configure this server to push its local sources to another vadimgest instance. Optional - only needed if this machine should act as an outbound edge client.</p>';
+  if (!cfg.server_url) {
+    html += '<div class="empty" style="margin-bottom:16px"><p>Set a server URL below to enable outbound edge sync from this machine.</p></div>';
+  }
+
+  // Connection fields (responsive 2-col grid)
+  html += '<div class="edge-fields-grid">';
+  html += '<div class="field"><label>Server URL</label><input id="edge-server-url" type="text" value="' + escHtml(cfg.server_url || '') + '" placeholder="https://server.example.com"></div>';
+  html += '<div class="field"><label>Token</label><input id="edge-token" type="password" placeholder="' + (cfg.token_configured ? 'configured - leave blank to keep' : 'paste generated token') + '"></div>';
+  html += '<div class="field"><label>Device ID</label><input id="edge-device-id" type="text" value="' + escHtml(cfg.device_id || '') + '" placeholder="this-machine"></div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+  html += '<div class="field"><label>Interval (seconds)</label><input id="edge-interval" type="number" min="1" value="' + escHtml(cfg.interval_seconds || 300) + '"></div>';
+  html += '<div class="field"><label>Batch size</label><input id="edge-batch-size" type="number" min="1" max="1000" value="' + escHtml(cfg.batch_size || 100) + '"></div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Enable toggle
+  html += '<div class="toggle-row" style="margin:4px 0 20px"><label class="toggle"><input type="checkbox" id="edge-enabled"' + (cfg.enabled ? ' checked' : '') + '><span class="toggle-track"></span></label><span class="toggle-label">Edge agent enabled</span></div>';
+
+  // Sources
+  html += '<div style="margin-bottom:20px">';
+  html += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Sources to push</div>';
+  html += '<p style="font-size:12px;color:var(--text3);margin:0 0 10px">If none selected, all enabled local sources are pushed.</p>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
   (sourcesData || []).forEach(s => {
     const checked = sourceSet.has(s.name);
-    html += '<label style="display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px">';
-    html += '<input type="checkbox" class="edge-source" value="' + escHtml(s.name) + '" ' + (checked ? 'checked' : '') + '>';
+    html += '<label style="display:flex;align-items:center;gap:6px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:12px;cursor:pointer">';
+    html += '<input type="checkbox" class="edge-source" value="' + escHtml(s.name) + '"' + (checked ? ' checked' : '') + ' style="accent-color:var(--accent)">';
     html += escHtml(s.name);
     html += '</label>';
   });
-  html += '</div>';
+  html += '</div></div>';
+
+  // Config actions
+  html += '<div style="margin-bottom:16px">';
+  html += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Config</div>';
   html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
-  html += '<button class="btn btn-primary" onclick="edgeSaveConfig()">Save</button>';
-  html += '<button class="btn" onclick="edgeTestConnection()">Test Connection</button>';
-  html += '<button class="btn" onclick="edgeRunOnce()">Run Once</button>';
-  html += '<button class="btn" onclick="edgeInstallAgent()">Install/Start Agent</button>';
-  html += '<button class="btn" onclick="edgeUninstallAgent()">Stop/Uninstall</button>';
-  html += '</div>';
-  html += '<div id="edge-agent-output" style="margin-top:12px"></div>';
+  html += '<button class="btn btn-primary" onclick="edgeSaveConfig()" title="Save current config to disk">Save Config</button>';
+  html += '<button class="btn" onclick="edgeTestConnection()" title="Test connection to the remote server with current credentials">Test Connection</button>';
+  html += '</div></div>';
+
+  // Lifecycle actions
+  html += '<div>';
+  html += '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text3);margin-bottom:8px">Agent lifecycle</div>';
+  html += '<div style="display:flex;flex-wrap:wrap;gap:8px">';
+  html += '<button class="btn" onclick="edgeRunOnce()" title="Save config and run a single sync now">Run Once</button>';
+  html += '<button class="btn" onclick="edgeInstallAgent()" title="Install and start the background edge agent on this machine">Install / Start Agent</button>';
+  html += '<button class="btn" onclick="edgeUninstallAgent()" title="Stop and remove the background edge agent">Stop / Uninstall</button>';
+  html += '</div></div>';
+
+  html += '<div id="edge-agent-output" style="margin-top:16px"></div>';
   html += '</div>';
 
   el.innerHTML = html;

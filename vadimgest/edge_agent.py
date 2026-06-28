@@ -61,17 +61,32 @@ class EdgeRunResult:
     hostname: str = ""
     started_at: str = ""
     finished_at: str = ""
+    duration_sec: float = 0
+    error: str | None = None
     sources: list[EdgeSourceResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        sources = [s.to_dict() for s in self.sources]
+        totals = {
+            "synced": sum(s["synced"] for s in sources),
+            "uploaded": sum(s["uploaded"] for s in sources),
+            "skipped": sum(s["skipped"] for s in sources),
+            "failed": sum(s["failed"] for s in sources),
+            "pending": sum(s["pending"] for s in sources),
+            "error_count": len([s for s in sources if s.get("error")]) + (1 if self.error else 0),
+        }
+        ok = self.ok and totals["error_count"] == 0
         return {
-            "ok": self.ok and not any(s.error for s in self.sources),
+            "ok": ok,
             "device_id": self.device_id,
             "server_url": self.server_url,
             "hostname": self.hostname,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
-            "sources": [s.to_dict() for s in self.sources],
+            "duration_sec": self.duration_sec,
+            "error": self.error,
+            "totals": totals,
+            "sources": sources,
         }
 
 
@@ -193,6 +208,10 @@ class EdgeAgent:
             ],
         }
 
+    def get_last_run(self) -> dict[str, Any] | None:
+        last_run = self._load_state().get("last_run")
+        return last_run if isinstance(last_run, dict) else None
+
     def _sync_source(self, source: str) -> tuple[int, str | None]:
         cls = get_syncer_class(source)
         if cls is None:
@@ -243,17 +262,19 @@ class EdgeAgent:
         return accepted, skipped, failed, prefix, data
 
     def run_once(self) -> EdgeRunResult:
-        self.validate_config()
+        started_at = _now()
+        started_monotonic = time.monotonic()
         state = self._load_state()
         result = EdgeRunResult(
             device_id=self.config.get("device_id") or "",
             server_url=self.config.get("server_url") or "",
             hostname=socket.gethostname(),
-            started_at=_now(),
+            started_at=started_at,
         )
 
-        batch_size = max(1, int(self.config.get("batch_size") or 100))
         try:
+            self.validate_config()
+            batch_size = max(1, int(self.config.get("batch_size") or 100))
             for source in self.selected_sources():
                 source_result = EdgeSourceResult(source=source)
                 synced, sync_error = self._sync_source(source)
@@ -291,10 +312,15 @@ class EdgeAgent:
                     source_result.error = str(e)
                     result.ok = False
 
+                source_result.pending = max(0, total - checkpoint)
                 source_result.checkpoint = checkpoint
                 result.sources.append(source_result)
+        except Exception as e:
+            result.ok = False
+            result.error = str(e)
         finally:
             result.finished_at = _now()
+            result.duration_sec = round(time.monotonic() - started_monotonic, 2)
             self._set_run_state(state, result)
             self._save_state(state)
 

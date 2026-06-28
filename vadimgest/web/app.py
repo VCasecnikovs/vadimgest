@@ -335,6 +335,30 @@ def create_app(store: DataStore | None = None) -> Flask:
                         continue
         return runs[-limit:]
 
+    def _edge_service_hint() -> dict:
+        from .autostart import EDGE_LAUNCHD_LABEL, EDGE_SYSTEMD_UNIT
+        if sys.platform == "darwin":
+            return {"manager": "launchd", "label": EDGE_LAUNCHD_LABEL}
+        if sys.platform == "linux":
+            return {"manager": "systemd", "label": EDGE_SYSTEMD_UNIT}
+        return {"manager": sys.platform, "label": ""}
+
+    def _edge_config_issues(agent: EdgeAgent, config: dict) -> list[str]:
+        issues = []
+        if not config.get("enabled"):
+            issues.append("edge config disabled")
+        if not config.get("server_url"):
+            issues.append("edge.server_url is required")
+        if not config.get("token_configured"):
+            issues.append("VADIMGEST_EDGE_TOKEN is required")
+        if config.get("enabled"):
+            try:
+                if not agent.selected_sources():
+                    issues.append("no selected or enabled edge sources")
+            except Exception as e:
+                issues.append(f"source selection failed: {e}")
+        return issues
+
     def _get_search_health() -> dict:
         try:
             from ..search.indexer import DEFAULT_DB
@@ -902,9 +926,14 @@ def create_app(store: DataStore | None = None) -> Flask:
     @app.route("/api/edge/agent", methods=["GET"])
     def api_edge_agent_status():
         from .autostart import is_edge_installed
+        agent = EdgeAgent(store)
+        config = get_edge_config()
         return jsonify({
             "installed": is_edge_installed(),
-            "config": get_edge_config(),
+            "config": config,
+            "last_run": agent.get_last_run(),
+            "config_issues": _edge_config_issues(agent, config),
+            "service_hint": _edge_service_hint(),
         })
 
     @app.route("/api/edge/agent/install", methods=["POST", "DELETE"])

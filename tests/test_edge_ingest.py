@@ -186,6 +186,44 @@ def test_edge_agent_upload_advances_checkpoint_only_on_success(store):
     assert len(calls) == 1
 
 
+def test_edge_agent_persists_last_run_summary(store):
+    store.append("local", {"id": "r1", "type": "document", "title": "One"})
+
+    def transport(url, token, payload, timeout):
+        return 200, {
+            "ok": True,
+            "accepted": len(payload["events"]),
+            "skipped": 0,
+            "errors": [],
+            "records": [{"index": i, "status": "accepted"} for i in range(len(payload["events"]))],
+        }
+
+    agent = EdgeAgent(
+        store,
+        {"enabled": True, "server_url": "https://server.test", "device_id": "mac", "batch_size": 100, "sources": ["local"]},
+        token="secret",
+        transport=transport,
+    )
+    agent.selected_sources = lambda: ["local"]
+    agent._sync_source = lambda source: (0, None)
+
+    result = agent.run_once().to_dict()
+    last_run = json.loads((store.base_path / "edge_state.json").read_text())["last_run"]
+
+    assert result["ok"] is True
+    assert last_run["ok"] is True
+    assert last_run["started_at"]
+    assert last_run["finished_at"]
+    assert "duration_sec" in last_run
+    assert last_run["totals"]["uploaded"] == 1
+    assert last_run["uploaded_total"] == 1
+    assert last_run["totals"]["skipped"] == 0
+    assert last_run["totals"]["failed"] == 0
+    assert last_run["totals"]["pending"] == 0
+    assert last_run["sources"][0]["source"] == "local"
+    assert last_run["sources"][0]["checkpoint"] == 1
+
+
 def test_edge_agent_keeps_pending_records_after_network_failure(store):
     store.append("local", {"id": "r1", "type": "document"})
 
@@ -206,6 +244,60 @@ def test_edge_agent_keeps_pending_records_after_network_failure(store):
     assert result["ok"] is False
     assert result["sources"][0]["checkpoint"] == 0
     assert result["sources"][0]["pending"] == 1
+    last_run = json.loads((store.base_path / "edge_state.json").read_text())["last_run"]
+    assert last_run["ok"] is False
+    assert last_run["totals"]["error_count"] == 1
+    assert last_run["sources"][0]["error"] == "network down"
+
+
+def test_edge_agent_persists_fatal_config_error(store):
+    agent = EdgeAgent(
+        store,
+        {"enabled": True, "server_url": "", "device_id": "mac", "batch_size": 100, "sources": ["local"]},
+        token="",
+    )
+
+    result = agent.run_once().to_dict()
+    last_run = json.loads((store.base_path / "edge_state.json").read_text())["last_run"]
+
+    assert result["ok"] is False
+    assert result["error"] == "edge.server_url is required"
+    assert last_run["error"] == "edge.server_url is required"
+    assert last_run["totals"]["error_count"] == 1
+
+
+def test_web_edge_agent_status_returns_observability(store, monkeypatch):
+    import vadimgest.web.app as appmod
+
+    (store.base_path / "edge_state.json").write_text(json.dumps({
+        "sources": {},
+        "last_run": {
+            "ok": False,
+            "finished_at": "2026-06-28T20:00:00+00:00",
+            "totals": {"uploaded": 0, "skipped": 0, "failed": 0, "pending": 0, "error_count": 1},
+            "sources": [],
+            "error": "edge.server_url is required",
+        },
+    }))
+    monkeypatch.setattr(appmod, "get_edge_config", lambda: {
+        "enabled": False,
+        "server_url": "",
+        "device_id": "mac",
+        "interval_seconds": 300,
+        "batch_size": 100,
+        "sources": None,
+        "token_configured": False,
+    })
+
+    app = create_app(store)
+    app.config["TESTING"] = True
+    data = app.test_client().get("/api/edge/agent").get_json()
+
+    assert data["last_run"]["error"] == "edge.server_url is required"
+    assert "edge config disabled" in data["config_issues"]
+    assert "edge.server_url is required" in data["config_issues"]
+    assert "VADIMGEST_EDGE_TOKEN is required" in data["config_issues"]
+    assert data["service_hint"]["manager"]
 
 
 def test_edge_autostart_launchd_is_separate_from_dashboard_services(tmp_path, monkeypatch):

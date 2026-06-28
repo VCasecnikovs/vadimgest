@@ -20,7 +20,9 @@ from ..edge import (
     create_edge_token,
     ingest_edge_batch,
     list_edge_tokens,
+    load_edge_source_stats,
     revoke_edge_token,
+    save_edge_source_stats,
     verify_edge_token,
 )
 from ..config import (
@@ -126,6 +128,91 @@ def create_app(store: DataStore | None = None) -> Flask:
     _daemon_started_at: str | None = None
 
     _schema_cache: dict[str, dict] = {}
+    _edge_record_stats_cache: dict[str, dict] = {}
+
+    def _source_file_signature(path: Path) -> str:
+        stat = path.stat()
+        return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+    def _file_contains_edge_marker(path: Path) -> bool:
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        return False
+                    if b'"edge"' in chunk:
+                        return True
+        except OSError:
+            return False
+
+    def _save_edge_record_stats(source: str, cache_key: str, result: dict):
+        data = load_edge_source_stats(store.base_path)
+        data.setdefault("sources", {})[source] = {
+            "edge_records": int(result.get("edge_records") or 0),
+            "edge_last_ts": result.get("edge_last_ts"),
+            "cache_key": cache_key,
+        }
+        save_edge_source_stats(data, store.base_path)
+
+    def _get_edge_record_stats(source: str) -> dict:
+        source_file = store.sources_dir / f"{source}.jsonl"
+        empty = {"edge_records": 0, "edge_last_ts": None}
+        if not source_file.exists():
+            return empty
+
+        cache_key = _source_file_signature(source_file)
+        cached = _edge_record_stats_cache.get(source)
+        if cached and cached.get("cache_key") == cache_key:
+            return {
+                "edge_records": cached["edge_records"],
+                "edge_last_ts": cached["edge_last_ts"],
+            }
+
+        persisted = load_edge_source_stats(store.base_path).get("sources", {}).get(source)
+        if isinstance(persisted, dict) and persisted.get("cache_key") == cache_key:
+            result = {
+                "edge_records": int(persisted.get("edge_records") or 0),
+                "edge_last_ts": persisted.get("edge_last_ts"),
+            }
+            _edge_record_stats_cache[source] = {"cache_key": cache_key, **result}
+            return result
+
+        if not _file_contains_edge_marker(source_file):
+            _save_edge_record_stats(source, cache_key, empty)
+            _edge_record_stats_cache[source] = {"cache_key": cache_key, **empty}
+            return empty
+
+        count = 0
+        latest_ts = None
+        latest_dt = None
+        try:
+            with open(source_file) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    edge_meta = record.get("edge")
+                    if not isinstance(edge_meta, dict) or not edge_meta:
+                        continue
+                    count += 1
+                    ts = edge_meta.get("received_at") or record.get("_ingested_at")
+                    parsed = _parse_dt(ts)
+                    if parsed is not None and (latest_dt is None or parsed > latest_dt):
+                        latest_dt = parsed
+                        latest_ts = ts
+                    elif latest_ts is None and ts:
+                        latest_ts = ts
+        except OSError:
+            return empty
+
+        result = {"edge_records": count, "edge_last_ts": latest_ts}
+        _edge_record_stats_cache[source] = {"cache_key": cache_key, **result}
+        _save_edge_record_stats(source, cache_key, result)
+        return result
 
     def _validate_source_config(name: str, config: dict) -> list[str]:
         errors = []
@@ -186,6 +273,15 @@ def create_app(store: DataStore | None = None) -> Flask:
             error = get_load_error(name) if cls is None else None
             state = store.get_state(name)
             stat = stats.get(name, {})
+            edge_stat = _get_edge_record_stats(name)
+            total_records = stat.get("records", 0)
+            edge_records = edge_stat["edge_records"]
+            if edge_records <= 0:
+                origin = "main"
+            elif edge_records >= total_records and total_records > 0:
+                origin = "edge"
+            else:
+                origin = "mixed"
 
             ready_info = None
             if cls:
@@ -304,7 +400,11 @@ def create_app(store: DataStore | None = None) -> Flask:
                 "available": cls is not None,
                 "ready": effective_ready,
                 "error": error,
-                "records": stat.get("records", 0),
+                "records": total_records,
+                "edge_records": edge_records,
+                "edge_last_ts": edge_stat["edge_last_ts"],
+                "origin": origin,
+                "edge_active": edge_records > 0,
                 "last_ts": state.last_ts,
                 "config_schema": schema,
                 "dependencies": deps,
@@ -3818,6 +3918,8 @@ function renderDashboard() {
   html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot warn"></span>Needs setup</span>';
   html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Disabled</span>';
   html += '<span style="display:flex;align-items:center;gap:4px"><span class="src-dot off"></span>Unavailable</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="badge badge-green">edge</span>Received from edge</span>';
+  html += '<span style="display:flex;align-items:center;gap:4px"><span class="badge badge-gray">main</span>Main collector</span>';
   html += '</div>';
   html += '<div class="src-grid">';
   const latestBySourceDash = {};
@@ -3837,6 +3939,9 @@ function renderDashboard() {
     const isUnavail = status === 'unavailable';
     const dotCls = isActive ? 'active' : isWarn ? 'warn' : 'off';
     const badgeLbl = isActive ? 'Active' : isWarn ? 'Needs setup' : isUnavail ? 'Unavailable' : 'Disabled';
+    const origin = s.origin || 'main';
+    const originBadgeCls = origin === 'edge' ? 'badge-green' : origin === 'mixed' ? 'badge-yellow' : 'badge-gray';
+    const originLabel = origin === 'edge' ? 'edge' : origin === 'mixed' ? 'mixed' : 'main';
     const badgeTitle = isUnavail ? 'Python package not installed'
       : !s.enabled ? 'Collector is turned off - toggle Enabled to start syncing. Existing data is kept.'
       : isWarn ? ((s.ready && s.ready.missing) || []).join(', ')
@@ -3847,6 +3952,7 @@ function renderDashboard() {
     html += '<div class="src-header">';
     html += '<span class="src-dot ' + dotCls + '"></span>';
     html += '<span class="src-name">' + escHtml(s.display_name) + '</span>';
+    html += '<span class="badge ' + originBadgeCls + '" title="Record origin">' + originLabel + '</span>';
     html += '<span class="src-badge ' + dotCls + '" title="' + escHtml(badgeTitle) + '">' + badgeLbl + '</span>';
     html += '</div>';
     if (s.description) html += '<div class="src-desc">' + escHtml(s.description) + '</div>';
@@ -3859,6 +3965,7 @@ function renderDashboard() {
     } else {
       html += '<div class="src-stats"><span>No data</span><span>' + timeAgo(syncTimeDash) + '</span></div>';
     }
+    html += '<div class="src-stats" style="margin-top:4px"><span>' + fmtNum(s.edge_records || 0) + ' edge records</span><span>edge ' + timeAgo(s.edge_last_ts) + '</span></div>';
     if (syncFailedDash) html += '<div style="font-size:11px;color:var(--red);margin-top:2px">Last sync failed: ' + escHtml(latestRunDash.error || 'unknown error') + '</div>';
     html += '</div>';
   });

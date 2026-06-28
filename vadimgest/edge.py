@@ -74,6 +74,10 @@ def _token_registry_path(base_path: str | Path | None = None) -> Path:
     return _edge_dir(base_path) / "tokens.json"
 
 
+def _source_stats_path(base_path: str | Path | None = None) -> Path:
+    return _edge_dir(base_path) / "source_stats.json"
+
+
 def _load_token_registry(base_path: str | Path | None = None) -> dict[str, Any]:
     path = _token_registry_path(base_path)
     if not path.exists():
@@ -97,6 +101,33 @@ def _save_token_registry(data: dict[str, Any], base_path: str | Path | None = No
         os.chmod(tmp_path, 0o600)
         os.replace(tmp_path, path)
         os.chmod(path, 0o600)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def load_edge_source_stats(base_path: str | Path | None = None) -> dict[str, Any]:
+    path = _source_stats_path(base_path)
+    if not path.exists():
+        return {"sources": {}}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {"sources": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("sources"), dict):
+        return {"sources": {}}
+    return data
+
+
+def save_edge_source_stats(data: dict[str, Any], base_path: str | Path | None = None):
+    path = _source_stats_path(base_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
     except Exception:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -255,6 +286,29 @@ def normalize_edge_event(
     return source, record
 
 
+def _source_file_signature(path: Path) -> str:
+    stat = path.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _record_edge_accepts(store: DataStore, accepted: dict[str, dict[str, Any]]):
+    if not accepted:
+        return
+    path = _source_stats_path(store.base_path)
+    with FileLock(str(path) + ".lock"):
+        data = load_edge_source_stats(store.base_path)
+        sources = data.setdefault("sources", {})
+        for source, item in accepted.items():
+            source_stats = sources.setdefault(source, {})
+            source_stats["edge_records"] = int(source_stats.get("edge_records") or 0) + int(item["count"])
+            if item.get("last_ts"):
+                source_stats["edge_last_ts"] = item["last_ts"]
+            source_file = store.sources_dir / f"{source}.jsonl"
+            if source_file.exists():
+                source_stats["cache_key"] = _source_file_signature(source_file)
+        save_edge_source_stats(data, store.base_path)
+
+
 def ingest_edge_batch(store: DataStore, payload: dict[str, Any]) -> EdgeIngestResult:
     """Ingest a local edge-agent batch into DataStore idempotently."""
     if not isinstance(payload, dict):
@@ -270,6 +324,7 @@ def ingest_edge_batch(store: DataStore, payload: dict[str, Any]) -> EdgeIngestRe
     device_id = str(payload.get("device_id") or "").strip()
     received_at = _now()
     result = EdgeIngestResult()
+    accepted_by_source: dict[str, dict[str, Any]] = {}
 
     for idx, event in enumerate(events):
         try:
@@ -289,6 +344,9 @@ def ingest_edge_batch(store: DataStore, payload: dict[str, Any]) -> EdgeIngestRe
                 })
                 continue
             appended = store.append(source, record)
+            source_accepts = accepted_by_source.setdefault(source, {"count": 0, "last_ts": None})
+            source_accepts["count"] += 1
+            source_accepts["last_ts"] = record.get("edge", {}).get("received_at") or received_at
             result.accepted += 1
             result.records.append({
                 "index": idx,
@@ -300,4 +358,5 @@ def ingest_edge_batch(store: DataStore, payload: dict[str, Any]) -> EdgeIngestRe
         except EdgeIngestError as exc:
             result.errors.append({"index": idx, "error": str(exc)})
 
+    _record_edge_accepts(store, accepted_by_source)
     return result

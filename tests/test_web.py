@@ -265,10 +265,80 @@ class TestAPIGet:
         resp = client.get("/api/sources")
         data = resp.get_json()
         required = {"name", "display_name", "enabled", "available", "records",
+                     "edge_records", "edge_last_ts", "origin", "edge_active",
                      "dependencies", "config_schema", "current_config", "defaults"}
         for source in data:
             missing = required - set(source.keys())
             assert not missing, f"Source '{source.get('name')}' missing fields: {missing}"
+
+    def test_sources_report_edge_origin_counts(self, fresh_client):
+        client, env = fresh_client
+        from vadimgest.store import DataStore
+
+        store = DataStore(env["data_home"])
+        store.append("telegram", {"id": "main-1", "type": "message", "text": "main"})
+        store.append("telegram", {
+            "id": "edge-1",
+            "type": "message",
+            "text": "edge",
+            "edge": {
+                "device_id": "macbook-test",
+                "source": "telegram",
+                "received_at": "2026-06-28T20:00:00+00:00",
+            },
+        })
+
+        resp = client.get("/api/sources")
+        data = resp.get_json()
+        telegram = next(s for s in data if s["name"] == "telegram")
+
+        assert telegram["records"] == 2
+        assert telegram["edge_records"] == 1
+        assert telegram["edge_active"] is True
+        assert telegram["origin"] == "mixed"
+        assert telegram["edge_last_ts"] == "2026-06-28T20:00:00+00:00"
+
+    def test_sources_use_persisted_edge_origin_counts(self, fresh_client):
+        client, env = fresh_client
+        from vadimgest.edge import save_edge_source_stats
+        from vadimgest.store import DataStore
+
+        store = DataStore(env["data_home"])
+        store.append("telegram", {
+            "id": "edge-1",
+            "type": "message",
+            "text": "edge",
+            "edge": {
+                "device_id": "macbook-test",
+                "source": "telegram",
+                "received_at": "2026-06-28T19:00:00+00:00",
+            },
+        })
+        source_file = store.sources_dir / "telegram.jsonl"
+        stat = source_file.stat()
+        save_edge_source_stats({
+            "sources": {
+                "telegram": {
+                    "edge_records": 1,
+                    "edge_last_ts": "2026-06-28T20:00:00+00:00",
+                    "cache_key": f"{stat.st_mtime_ns}:{stat.st_size}",
+                }
+            }
+        }, env["data_home"])
+
+        resp = client.get("/api/sources")
+        telegram = next(s for s in resp.get_json() if s["name"] == "telegram")
+
+        assert telegram["edge_records"] == 1
+        assert telegram["edge_last_ts"] == "2026-06-28T20:00:00+00:00"
+
+    def test_dashboard_includes_edge_source_labels(self, client):
+        resp = client.get("/")
+        html = resp.get_data(as_text=True)
+
+        assert "edge records" in html
+        assert "Received from edge" in html
+        assert "Main collector" in html
 
     def test_sources_have_valid_categories(self, client):
         resp = client.get("/api/sources")

@@ -8,6 +8,7 @@ from vadimgest.edge import (
     create_edge_token,
     ingest_edge_batch,
     list_edge_tokens,
+    load_edge_source_stats,
     normalize_edge_event,
     revoke_edge_token,
     sanitize_source,
@@ -83,6 +84,26 @@ def test_ingest_edge_batch_is_idempotent(store):
     row = json.loads((store.sources_dir / "imessage.jsonl").read_text().strip())
     assert row["actor"] == "Alice"
     assert row["edge"]["device_id"] == "macbook-vadim"
+
+
+def test_ingest_edge_batch_updates_source_stats(store):
+    payload = {
+        "device_id": "macbook-vadim",
+        "source": "imessage",
+        "events": [
+            {"source_uri": "imessage://chat/a/message/1", "text": "one"},
+            {"source_uri": "imessage://chat/a/message/2", "text": "two"},
+        ],
+    }
+
+    result = ingest_edge_batch(store, payload)
+    stats = load_edge_source_stats(store.base_path)
+    imessage = stats["sources"]["imessage"]
+
+    assert result.accepted == 2
+    assert imessage["edge_records"] == 2
+    assert imessage["edge_last_ts"]
+    assert imessage["cache_key"]
 
 
 def test_web_edge_batch_endpoint(store):

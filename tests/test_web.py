@@ -103,14 +103,22 @@ class TestDashboardHTML:
     def test_has_all_tabs(self, client):
         resp = client.get("/")
         html = resp.data.decode()
-        for tab in ["Dashboard", "Observatory", "Sources", "Docs"]:
+        for tab in ["Dashboard", "Observatory", "Sources", "Messages", "Docs"]:
             assert tab in html, f"Tab '{tab}' missing from dashboard"
 
     def test_has_api_fetch_calls(self, client):
         resp = client.get("/")
         html = resp.data.decode()
-        for endpoint in ["/api/sources", "/api/runs", "/api/config", "/api/queues", "/api/consumers", "/api/observatory"]:
+        for endpoint in ["/api/sources", "/api/runs", "/api/config", "/api/queues", "/api/consumers", "/api/observatory", "/api/data/overview", "/api/data/browse", "/api/data/search"]:
             assert endpoint in html, f"API endpoint '{endpoint}' not referenced in JS"
+
+    def test_messages_tab_opens_data_explorer(self, client):
+        resp = client.get("/")
+        html = resp.data.decode()
+
+        assert 'data-tab="data"' in html
+        assert 'id="tab-data"' in html
+        assert "if (target === 'data') renderData();" in html
 
     def test_js_syntax_valid(self, client):
         """Extract JS from the page and validate with node --check."""
@@ -398,6 +406,34 @@ class TestAPIGet:
         assert "data_dir" in data
         assert "env_file" in data
         assert "has_config" in data
+
+    def test_data_overview_counts_preserved_jsonl_lines(self, fresh_client):
+        client, env = fresh_client
+        source_file = env["data_home"] / "sources" / "direct.jsonl"
+        source_file.write_text(
+            json.dumps({"_ingested_at": "2026-06-30T00:00:00+00:00", "data": {"type": "message", "text": "one"}}) + "\n" +
+            json.dumps({"_ingested_at": "2026-06-30T00:01:00+00:00", "data": {"type": "message", "text": "two"}}) + "\n"
+        )
+
+        resp = client.get("/api/data/overview")
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        direct = next(s for s in data["sources"] if s["name"] == "direct")
+        assert direct["records"] == 2
+        assert direct["types"]["message"] == 2
+
+    def test_data_browse_can_return_full_preserved_record(self, fresh_client):
+        client, env = fresh_client
+        long_text = "x" * 700
+        source_file = env["data_home"] / "sources" / "telegram.jsonl"
+        source_file.write_text(json.dumps({"id": "m1", "type": "message", "text": long_text}) + "\n")
+
+        compact = client.get("/api/data/browse?source=telegram&limit=1").get_json()
+        full = client.get("/api/data/browse?source=telegram&limit=1&full=1").get_json()
+
+        assert compact["records"][0]["text"] == "x" * 500 + "..."
+        assert full["records"][0]["text"] == long_text
 
 
 # ---------------------------------------------------------------------------

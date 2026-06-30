@@ -1533,13 +1533,11 @@ def create_app(store: DataStore | None = None) -> Flask:
 
     @app.route("/api/data/overview")
     def api_data_overview():
-        stats = store.stats()
         result = []
         for source_file in sorted(store.sources_dir.glob("*.jsonl")):
             name = source_file.stem
             size = source_file.stat().st_size
-            stat = stats.get(name, {})
-            records = stat.get("records", 0)
+            records = store.count(name)
 
             first_ts = last_ts = None
             types = {}
@@ -1578,7 +1576,8 @@ def create_app(store: DataStore | None = None) -> Flask:
                             break
                         try:
                             rec = json.loads(line)
-                            t = rec.get("type", "unknown")
+                            payload = rec.get("data") if isinstance(rec.get("data"), dict) else rec
+                            t = payload.get("type") or rec.get("type") or "unknown"
                             types[t] = types.get(t, 0) + 1
                         except Exception:
                             pass
@@ -1606,6 +1605,7 @@ def create_app(store: DataStore | None = None) -> Flask:
 
         offset = request.args.get("offset", 0, type=int)
         limit = min(request.args.get("limit", 20, type=int), 100)
+        full = (request.args.get("full") or "").lower() in {"1", "true", "yes"}
 
         source_file = store.sources_dir / f"{source}.jsonl"
         if not source_file.resolve().is_relative_to(store.sources_dir.resolve()):
@@ -1622,12 +1622,13 @@ def create_app(store: DataStore | None = None) -> Flask:
                     break
                 try:
                     rec = json.loads(line)
-                    for key in list(rec.keys()):
-                        val = rec[key]
-                        if isinstance(val, str) and len(val) > 500:
-                            rec[key] = val[:500] + "..."
-                        elif isinstance(val, list) and len(val) > 10:
-                            rec[key] = val[:10] + [f"... +{len(val)-10} more"]
+                    if not full:
+                        for key in list(rec.keys()):
+                            val = rec[key]
+                            if isinstance(val, str) and len(val) > 500:
+                                rec[key] = val[:500] + "..."
+                            elif isinstance(val, list) and len(val) > 10:
+                                rec[key] = val[:10] + [f"... +{len(val)-10} more"]
                     records.append(rec)
                 except Exception:
                     pass
@@ -3330,6 +3331,7 @@ body {
   <div class="tab active" data-tab="dashboard" tabindex="0" role="tab" aria-selected="true">Dashboard</div>
   <div class="tab" data-tab="observatory" tabindex="0" role="tab" aria-selected="false">Observatory</div>
   <div class="tab" data-tab="sources" tabindex="0" role="tab" aria-selected="false">Sources</div>
+  <div class="tab" data-tab="data" tabindex="0" role="tab" aria-selected="false">Messages</div>
   <div class="tab" data-tab="edge" tabindex="0" role="tab" aria-selected="false">Edge Sync</div>
   <div class="tab" data-tab="docs" tabindex="0" role="tab" aria-selected="false">Docs</div>
 </div>
@@ -3339,6 +3341,7 @@ body {
   <div class="tab-content active" id="tab-dashboard"></div>
   <div class="tab-content" id="tab-observatory"></div>
   <div class="tab-content" id="tab-sources"></div>
+  <div class="tab-content" id="tab-data"></div>
   <div class="tab-content" id="tab-edge"></div>
   <div class="tab-content" id="tab-docs"></div>
 </div>
@@ -3420,6 +3423,7 @@ function activateTab(tab) {
   if (target === 'dashboard') renderDashboard();
   if (target === 'observatory') renderObservatory();
   if (target === 'sources') renderSourcesPage();
+  if (target === 'data') renderData();
   if (target === 'edge') renderEdgePage();
   if (target === 'docs') renderDocsPage();
 }
@@ -4910,8 +4914,9 @@ function renderDataContent(data) {
   html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-bottom:24px">';
   sources.forEach(s => {
     var pct = maxRecords > 0 ? Math.round(s.records / maxRecords * 100) : 0;
+    var latestOffset = Math.max(0, (s.records || 0) - 20);
     var typeKeys = Object.keys(s.types || {});
-    html += '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;cursor:pointer" onclick="browseSource(\\x27' + escHtml(s.name) + '\\x27)">';
+    html += '<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;cursor:pointer" onclick="browseSource(\\x27' + escHtml(s.name) + '\\x27,' + latestOffset + ')">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
     html += '<span style="font-weight:600;font-size:14px;color:var(--text)">' + escHtml(s.name) + '</span>';
     if (typeKeys.length > 0) {
@@ -4943,7 +4948,7 @@ function browseSource(name, offset) {
   var limit = 20;
   var el = document.getElementById('data-results');
   el.innerHTML = '<div style="padding:20px;color:var(--text3)">Loading ' + escHtml(name) + '...</div>';
-  fetch('/api/data/browse?source=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + limit)
+  fetch('/api/data/browse?source=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + limit + '&full=1')
     .then(r => r.json()).then(data => {
       if (data.error) { el.innerHTML = '<div style="color:var(--accent);padding:20px">' + escHtml(data.error) + '</div>'; return; }
       renderBrowseResults(name, data.records, data.total, data.offset, data.limit);
@@ -4955,10 +4960,13 @@ function browseSource(name, offset) {
 function renderBrowseResults(source, records, total, offset, limit) {
   var el = document.getElementById('data-results');
   var html = '';
+  var start = total > 0 ? offset + 1 : 0;
+  var latestOffset = Math.max(0, total - limit);
   html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
-  html += '<h3 style="font-size:16px;font-weight:600;color:var(--text);margin:0">' + escHtml(source) + ' <span style="color:var(--text3);font-weight:400;font-size:13px">Showing ' + (offset + 1) + '-' + Math.min(offset + limit, total) + ' of ' + fmtNum(total) + '</span></h3>';
+  html += '<h3 style="font-size:16px;font-weight:600;color:var(--text);margin:0">' + escHtml(source) + ' <span style="color:var(--text3);font-weight:400;font-size:13px">Showing ' + start + '-' + Math.min(offset + limit, total) + ' of ' + fmtNum(total) + '</span></h3>';
   html += '<div style="display:flex;gap:8px">';
   if (offset > 0) html += '<button onclick="browseSource(\\x27' + escHtml(source) + '\\x27,' + Math.max(0, offset - limit) + ')" style="padding:6px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);cursor:pointer;font-size:12px">\\u2190 Previous</button>';
+  if (offset + limit < total) html += '<button onclick="browseSource(\\x27' + escHtml(source) + '\\x27,' + latestOffset + ')" style="padding:6px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);cursor:pointer;font-size:12px">Latest</button>';
   if (offset + limit < total) html += '<button onclick="browseSource(\\x27' + escHtml(source) + '\\x27,' + (offset + limit) + ')" style="padding:6px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);cursor:pointer;font-size:12px">Next \\u2192</button>';
   html += '</div></div>';
 

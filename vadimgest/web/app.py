@@ -263,7 +263,6 @@ def create_app(store: DataStore | None = None) -> Flask:
         return errors
 
     def _get_sources_data() -> list[dict]:
-        stats = store.stats()
         demo_cold = os.environ.get("VADIMGEST_DEMO_COLD") == "1"
         sources = []
         for name in all_source_names():
@@ -272,9 +271,8 @@ def create_app(store: DataStore | None = None) -> Flask:
             cls = get_syncer_class(name)
             error = get_load_error(name) if cls is None else None
             state = store.get_state(name)
-            stat = stats.get(name, {})
             edge_stat = _get_edge_record_stats(name)
-            total_records = stat.get("records", 0)
+            total_records = store.count(name)
             edge_records = edge_stat["edge_records"]
             if edge_records <= 0:
                 origin = "main"
@@ -489,7 +487,6 @@ def create_app(store: DataStore | None = None) -> Flask:
             return {"available": False, "reason": _safe_error(e)}
 
     def _get_queues_data() -> dict:
-        stats = store.stats()
         consumers = {}
         for f in store.checkpoints_dir.glob("*.json"):
             try:
@@ -502,7 +499,7 @@ def create_app(store: DataStore | None = None) -> Flask:
         rows = []
         totals = {c: 0 for c in consumer_names}
         for src in source_names:
-            total = stats.get(src, {}).get("records", 0)
+            total = store.count(src)
             pending = {}
             for c in consumer_names:
                 pos = consumers[c].get("positions", {}).get(src, {})

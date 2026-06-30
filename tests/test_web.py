@@ -399,6 +399,41 @@ class TestAPIGet:
         assert isinstance(data["consumers"], list)
         assert isinstance(data["rows"], list)
 
+    def test_sources_count_preserved_jsonl_lines(self, fresh_client):
+        client, env = fresh_client
+        source_file = env["data_home"] / "sources" / "telegram.jsonl"
+        source_file.write_text(
+            json.dumps({"_ingested_at": "2026-06-30T00:00:00+00:00", "data": {"type": "message", "text": "one"}}) + "\n" +
+            json.dumps({"_ingested_at": "2026-06-30T00:01:00+00:00", "data": {"type": "message", "text": "two"}}) + "\n"
+        )
+
+        resp = client.get("/api/sources")
+
+        assert resp.status_code == 200
+        telegram = next(s for s in resp.get_json() if s["name"] == "telegram")
+        assert telegram["records"] == 2
+
+    def test_queues_count_preserved_jsonl_lines(self, fresh_client):
+        client, env = fresh_client
+        source_file = env["data_home"] / "sources" / "telegram.jsonl"
+        source_file.write_text(
+            json.dumps({"id": "one", "type": "message"}) + "\n" +
+            json.dumps({"id": "two", "type": "message"}) + "\n"
+        )
+        checkpoint = {
+            "consumer": "intake",
+            "positions": {"telegram": {"line": 1, "id": None}},
+            "updated_at": "2026-06-30T00:00:00+00:00",
+        }
+        (env["data_home"] / "checkpoints" / "intake.json").write_text(json.dumps(checkpoint))
+
+        resp = client.get("/api/queues")
+
+        assert resp.status_code == 200
+        telegram = next(r for r in resp.get_json()["rows"] if r["source"] == "telegram")
+        assert telegram["total"] == 2
+        assert telegram["pending"]["intake"] == 1
+
     def test_config_returns_paths(self, client):
         resp = client.get("/api/config")
         assert resp.status_code == 200

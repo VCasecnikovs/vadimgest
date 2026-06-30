@@ -120,6 +120,15 @@ class TestDashboardHTML:
         assert 'id="tab-data"' in html
         assert "if (target === 'data') renderData();" in html
 
+    def test_source_drawer_exposes_latest_records(self, client):
+        resp = client.get("/")
+        html = resp.data.decode()
+
+        assert "Latest Records" in html
+        assert "loadDrawerRecords" in html
+        assert "openDataExplorer" in html
+        assert "/api/data/browse?source=" in html
+
     def test_js_syntax_valid(self, client):
         """Extract JS from the page and validate with node --check."""
         resp = client.get("/")

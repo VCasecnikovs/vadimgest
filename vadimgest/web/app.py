@@ -4832,6 +4832,7 @@ function copyBlock(btn) {
 
 // ---- Data Explorer ----
 let dataOverview = null;
+let pendingDataBrowse = null;
 
 function fmtBytes(b) {
   if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
@@ -4866,6 +4867,11 @@ function renderData() {
   fetch('/api/data/overview').then(r => r.json()).then(data => {
     dataOverview = data;
     renderDataContent(data);
+    if (pendingDataBrowse) {
+      const pending = pendingDataBrowse;
+      pendingDataBrowse = null;
+      browseSource(pending.name, pending.offset);
+    }
   }).catch(e => {
     el.innerHTML = '<div style="color:var(--accent);padding:20px">Error loading data: ' + escHtml(e.message) + '</div>';
   });
@@ -5022,6 +5028,13 @@ function renderSearchResults(results, query) {
     html += '<div style="padding:20px;color:var(--text3);text-align:center">No results found</div>';
   }
   el.innerHTML = html;
+}
+
+function openDataExplorer(name, total) {
+  closeDrawer();
+  pendingDataBrowse = {name: name, offset: Math.max(0, (total || 0) - 20)};
+  const tab = document.querySelector('.tab[data-tab="data"]');
+  if (tab) activateTab(tab);
 }
 
 // ---- Drawer ----
@@ -5481,6 +5494,16 @@ function renderDrawerBody(s) {
   html += '<div class="stat-box"><div class="stat-box-value">' + timeAgo(s.last_ts) + '</div><div class="stat-box-label">Last sync</div></div>';
   html += '</div></div>';
 
+  html += '<div class="drawer-section">';
+  html += '<div class="drawer-section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">';
+  html += '<span>Latest Records</span>';
+  if (s.records > 0) {
+    html += '<button class="btn btn-sm" onclick="openDataExplorer(' + JSON.stringify(s.name).replace(/"/g, '&quot;') + ',' + (s.records || 0) + ')">Open in Messages</button>';
+  }
+  html += '</div>';
+  html += '<div id="drawer-records-' + escHtml(s.name) + '" style="font-size:12px;color:var(--text3)">Loading...</div>';
+  html += '</div>';
+
   // Error
   if (s.error) {
     html += '<div class="drawer-section">';
@@ -5490,6 +5513,54 @@ function renderDrawerBody(s) {
   }
 
   body.innerHTML = html;
+  setTimeout(function() {
+    if (openSourceName === s.name) loadDrawerRecords(s.name, s.records || 0);
+  }, 0);
+}
+
+function loadDrawerRecords(name, total) {
+  const el = document.getElementById('drawer-records-' + name);
+  if (!el) return;
+  if (!total) {
+    el.innerHTML = '<div style="color:var(--text3)">No preserved records yet.</div>';
+    return;
+  }
+  const limit = 8;
+  const offset = Math.max(0, total - limit);
+  fetch('/api/data/browse?source=' + encodeURIComponent(name) + '&offset=' + offset + '&limit=' + limit)
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        el.innerHTML = '<div style="color:var(--red)">' + escHtml(data.error) + '</div>';
+        return;
+      }
+      const records = (data.records || []).slice().reverse();
+      if (!records.length) {
+        el.innerHTML = '<div style="color:var(--text3)">No records found.</div>';
+        return;
+      }
+      let html = '';
+      records.forEach((rec, idx) => {
+        const payload = rec.data || rec;
+        const title = extractTitle(rec) || payload.id || rec.id || 'record';
+        const recType = payload.type || rec.type || 'record';
+        const ts = rec._ingested_at || payload.timestamp || payload.ts || payload.date || '';
+        const rid = 'drawer-rec-' + name + '-' + idx;
+        html += '<div style="border:1px solid var(--border);border-radius:8px;margin-bottom:6px;overflow:hidden;background:var(--bg2)">';
+        html += '<div onclick="var d=document.getElementById(\\'' + rid + '\\');d.style.display=d.style.display===\\'none\\'?\\'block\\':\\'none\\'" style="padding:8px 10px;cursor:pointer;display:flex;align-items:center;gap:8px">';
+        html += '<span style="color:var(--accent);font-size:11px;white-space:nowrap">' + escHtml(recType) + '</span>';
+        html += '<span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(title) + '</span>';
+        html += '<span style="font-size:10px;color:var(--text3);white-space:nowrap">' + fmtDate(ts) + '</span>';
+        html += '</div>';
+        html += '<div id="' + rid + '" style="display:none;padding:0 10px 10px">';
+        html += '<pre style="background:var(--bg3);padding:10px;border-radius:6px;font-family:JetBrains Mono,monospace;font-size:10px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;color:var(--text2);margin:0;max-height:280px">' + escHtml(JSON.stringify(rec, null, 2)) + '</pre>';
+        html += '</div></div>';
+      });
+      el.innerHTML = html;
+    })
+    .catch(e => {
+      el.innerHTML = '<div style="color:var(--red)">Error: ' + escHtml(e.message) + '</div>';
+    });
 }
 
 function renderDrawerFooter(s) {

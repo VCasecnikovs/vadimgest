@@ -122,9 +122,24 @@ class BeeSyncer(CronSyncer):
             yielded += 1
 
         # Conversations
+        existing_conversations = self._existing_conversation_states()
         for rec in self._parse_conversations():
             if yielded >= limit:
                 return
+            rec_id = rec.get("id", "")
+            completed_id = f"{rec_id}_completed"
+            states = existing_conversations.get(rec_id, set())
+            if (
+                rec.get("state") == "COMPLETED"
+                and "CAPTURING" in states
+                and not self.store.exists(self.source_name, completed_id)
+            ):
+                rec = {**rec, "id": completed_id, "conversation_id": rec_id}
+                yield rec
+                yielded += 1
+                continue
+            if self.store.exists(self.source_name, rec_id):
+                continue
             rec_ts = self._parse_ts(rec.get("start_time"))
             if last_ts and rec_ts and rec_ts <= last_ts:
                 continue
@@ -185,6 +200,18 @@ class BeeSyncer(CronSyncer):
             rec = self._parse_conversation_file(conv_file)
             if rec:
                 yield rec
+
+    def _existing_conversation_states(self) -> dict[str, set[str]]:
+        states = {}
+        for record in self.store.read_all(self.source_name):
+            data = record.data
+            if data.get("type") != "bee_conversation":
+                continue
+            rec_id = data.get("conversation_id") or data.get("id")
+            if not rec_id:
+                continue
+            states.setdefault(rec_id, set()).add(data.get("state", ""))
+        return states
 
     def _parse_conversation_file(self, path: Path) -> dict | None:
         text = path.read_text()

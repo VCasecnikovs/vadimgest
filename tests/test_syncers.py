@@ -96,9 +96,55 @@ def dayflow_syncer(tmp_store):
     return DayflowSyncer(tmp_store, config={"db_path": "/tmp/nonexistent.sqlite"})
 
 
+def _write_bee_conversation(sync_dir: Path, conv_id: str, state: str, text: str):
+    conv_dir = sync_dir / "conversations" / "2026-06-29"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    end_time = "2026-06-29T02:00:00Z" if state == "COMPLETED" else "n/a"
+    (conv_dir / f"{conv_id}.md").write_text(
+        "\n".join([
+            "- start_time: 2026-06-29T01:00:00Z",
+            f"- end_time: {end_time}",
+            f"- state: {state}",
+            "",
+            "## Transcriptions",
+            f"- Vadims: {text}",
+            "",
+        ])
+    )
+
+
 # ============================================================
 # Gmail Syncer Tests
 # ============================================================
+
+
+class TestBeeSyncer:
+    """Test Bee conversation state transitions."""
+
+    def test_completed_conversation_upgrade_is_versioned(self, tmp_store, tmp_path):
+        from vadimgest.ingest.sources.bee.syncer import BeeSyncer
+
+        sync_dir = tmp_path / "bee-sync"
+        _write_bee_conversation(sync_dir, "123", "CAPTURING", "partial")
+        syncer = BeeSyncer(tmp_store, {
+            "bee_bin": "bee",
+            "sync_dir": str(sync_dir),
+            "recent_days": 7,
+        })
+
+        with patch.object(syncer, "_run_sync", return_value=None):
+            count, _ = syncer.sync()
+        assert count == 1
+
+        _write_bee_conversation(sync_dir, "123", "COMPLETED", "full transcript")
+        with patch.object(syncer, "_run_sync", return_value=None):
+            count, _ = syncer.sync()
+
+        records = [r.data for r in tmp_store.read_all("bee")]
+        assert count == 1
+        assert [r["id"] for r in records] == ["bee_conv_123", "bee_conv_123_completed"]
+        assert records[1]["conversation_id"] == "bee_conv_123"
+        assert records[1]["state"] == "COMPLETED"
 
 class TestGmailMsgToRecord:
     """Test GmailSyncer._msg_to_record."""

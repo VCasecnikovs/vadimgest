@@ -383,6 +383,15 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         ORDER BY docs.rowid
     """, _active_sources).fetchall()
 
+    valid_vec_ids = {row[0] for row in rows}
+    stale_vec_ids = existing_vec - valid_vec_ids
+    for doc_id in stale_vec_ids:
+        conn.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
+    if stale_vec_ids:
+        conn.commit()
+        existing_vec -= stale_vec_ids
+    pruned = len(stale_vec_ids)
+
     to_embed = []
     for rowid, path, source, content, old_hash in rows:
         if limit and len(to_embed) >= limit:
@@ -398,6 +407,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             "total": len(rows),
             "embedded": 0,
             "skipped": len(rows),
+            "pruned": pruned,
             "embedding_space": desired_space,
         }
 
@@ -434,6 +444,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         "total": len(rows),
         "embedded": embedded,
         "skipped": len(rows) - len(to_embed),
+        "pruned": pruned,
         "embedding_space": desired_space,
     }
 

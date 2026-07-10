@@ -161,7 +161,8 @@ def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_D
     )
     dt = time.time() - t0
     print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
-          f"skipped={result['skipped']}, total={result['total']}")
+          f"skipped={result['skipped']}, pruned={result.get('pruned', 0)}, "
+          f"total={result['total']}")
 
 
 def cmd_embed_stats(db_path: Path = DEFAULT_DB):

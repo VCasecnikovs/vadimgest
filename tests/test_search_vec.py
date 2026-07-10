@@ -181,6 +181,23 @@ class TestIndexEmbeddings:
         assert r2["embedded"] == 0
         assert r2["skipped"] == 4
 
+    def test_prunes_vectors_for_removed_documents(self, tmp_db):
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            index_embeddings(db_path=tmp_db, provider="fake")
+
+            conn = get_db(tmp_db)
+            conn.execute("DELETE FROM docs WHERE path = ?", ("obsidian:People/Alice.md",))
+            conn.execute("DELETE FROM meta WHERE path = ?", ("obsidian:People/Alice.md",))
+            conn.commit()
+            conn.close()
+
+            result = index_embeddings(db_path=tmp_db, provider="fake")
+
+        conn = get_vec_db(tmp_db)
+        assert conn.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0] == 3
+        conn.close()
+        assert result["pruned"] == 1
+
     def test_rejects_mixed_or_unknown_embedding_space(self, tmp_db):
         with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
             index_embeddings(db_path=tmp_db, provider="provider-a")

@@ -121,6 +121,33 @@ def _write_bee_conversation(sync_dir: Path, conv_id: str, state: str, text: str)
 class TestBeeSyncer:
     """Test Bee conversation state transitions."""
 
+    def test_old_unseen_fact_is_not_hidden_by_global_cursor(self, tmp_store, tmp_path):
+        """Regression: the Bee July 1-6 gap was skipped behind last_ts, 2026-07-08."""
+        from vadimgest.ingest.sources.bee.syncer import BeeSyncer
+
+        syncer = BeeSyncer(tmp_store, {
+            "bee_bin": "bee",
+            "sync_dir": str(tmp_path / "bee-sync"),
+            "recent_days": 7,
+        })
+        old_unseen = {
+            "id": "bee_fact_late_arrival",
+            "type": "bee_fact",
+            "timestamp": "2026-07-02T12:00:00Z",
+            "text": "arrived after the cursor advanced",
+        }
+
+        with patch.object(syncer, "_run_sync", return_value=None), patch.object(
+            syncer, "_parse_facts", return_value=iter([old_unseen])
+        ), patch.object(syncer, "_parse_todos", return_value=iter([])), patch.object(
+            syncer, "_parse_conversations", return_value=iter([])
+        ), patch.object(syncer, "_parse_daily_summaries", return_value=iter([])):
+            records = list(syncer.fetch_new(
+                SourceState(last_ts="2026-07-08T12:00:00Z")
+            ))
+
+        assert records == [old_unseen]
+
     def test_completed_conversation_upgrade_is_versioned(self, tmp_store, tmp_path):
         from vadimgest.ingest.sources.bee.syncer import BeeSyncer
 

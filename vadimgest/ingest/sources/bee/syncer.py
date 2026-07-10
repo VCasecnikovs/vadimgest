@@ -88,19 +88,17 @@ class BeeSyncer(CronSyncer):
             self.log(f"bee sync warning: {result.stderr.strip()}")
 
     def fetch_new(self, state: SourceState, limit: int = 1000) -> Iterator[dict]:
-        """Fetch new records from bee sync output."""
+        """Fetch new records from bee sync output.
+
+        Dedup is by stable record id via store.exists() only. A cursor that
+        jumps ahead after an outage must not hide older unseen records that
+        later appear inside Bee's rolling sync window.
+        """
         try:
             self._run_sync()
         except FileNotFoundError:
             self.log(f"bee binary not found: {self.bee_bin}")
             return
-
-        last_ts = None
-        if state.last_ts:
-            try:
-                last_ts = datetime.fromisoformat(state.last_ts.replace("Z", "+00:00")).replace(tzinfo=None)
-            except Exception:
-                pass
 
         yielded = 0
 
@@ -108,8 +106,7 @@ class BeeSyncer(CronSyncer):
         for rec in self._parse_facts():
             if yielded >= limit:
                 return
-            rec_ts = self._parse_ts(rec.get("timestamp"))
-            if last_ts and rec_ts and rec_ts <= last_ts:
+            if self.store.exists(self.source_name, rec.get("id", "")):
                 continue
             yield rec
             yielded += 1
@@ -118,6 +115,8 @@ class BeeSyncer(CronSyncer):
         for rec in self._parse_todos():
             if yielded >= limit:
                 return
+            if self.store.exists(self.source_name, rec.get("id", "")):
+                continue
             yield rec
             yielded += 1
 
@@ -140,9 +139,6 @@ class BeeSyncer(CronSyncer):
                 continue
             if self.store.exists(self.source_name, rec_id):
                 continue
-            rec_ts = self._parse_ts(rec.get("start_time"))
-            if last_ts and rec_ts and rec_ts <= last_ts:
-                continue
             yield rec
             yielded += 1
 
@@ -150,8 +146,7 @@ class BeeSyncer(CronSyncer):
         for rec in self._parse_daily_summaries():
             if yielded >= limit:
                 return
-            rec_ts = self._parse_ts(rec.get("date"))
-            if last_ts and rec_ts and rec_ts <= last_ts:
+            if self.store.exists(self.source_name, rec.get("id", "")):
                 continue
             yield rec
             yielded += 1

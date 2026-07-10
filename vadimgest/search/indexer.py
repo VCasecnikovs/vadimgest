@@ -163,12 +163,16 @@ def _extract_jsonl_text(record: dict) -> tuple[str, str]:
     if rtype == "email":
         subject = record.get("subject", "")
         body = (record.get("body") or "").strip()
+        meta = record.get("meta") or {}
+        gmail_api_id = meta.get("message_id") or record.get("id") or ""
+        rfc822_message_id = record.get("rfc822_message_id") or meta.get("rfc822_message_id") or ""
         parts = [
             f"Subject: {subject}",
             f"From: {record.get('from') or ''}",
             f"To: {record.get('to') or ''}",
             f"Date: {record.get('date') or ''}",
-            f"Message-ID: {record.get('id') or ''}",
+            f"Gmail-API-ID: {gmail_api_id}",
+            f"RFC822-Message-ID: {rfc822_message_id}",
         ]
         if body and body != "---":
             parts.append(body)

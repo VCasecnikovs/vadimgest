@@ -7,6 +7,7 @@ with all external I/O mocked.
 import sys
 import os
 import json
+import base64
 import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1283,6 +1284,59 @@ class TestGmailGetThreadMessages:
         assert result[0]["subject"] == "Hello"
         assert result[0]["labels"] == ["INBOX", "UNREAD"]
 
+    def test_preserves_raw_headers_body_and_attachment_metadata(self, gmail_syncer):
+        encoded = base64.urlsafe_b64encode(b"Full untruncated email body").decode().rstrip("=")
+        raw_message = {
+            "id": "msg-full",
+            "threadId": "thread-1",
+            "internalDate": "1780000000000",
+            "sizeEstimate": 12345,
+            "snippet": "Full email",
+            "labelIds": ["INBOX"],
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [
+                    {"name": "From", "value": "alice@test.com"},
+                    {"name": "To", "value": "test@gmail.com"},
+                    {"name": "Subject", "value": "Lossless"},
+                    {"name": "Date", "value": "2026-07-10"},
+                    {"name": "Message-ID", "value": "<lossless@example.com>"},
+                    {"name": "Received", "value": "first-hop"},
+                    {"name": "Received", "value": "second-hop"},
+                ],
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "body": {"data": encoded, "size": 27},
+                    },
+                    {
+                        "mimeType": "application/pdf",
+                        "filename": "contract.pdf",
+                        "body": {"attachmentId": "att-1", "size": 99},
+                    },
+                ],
+            },
+        }
+        with patch.object(
+            _gmail_mod,
+            "gog_call",
+            return_value={"thread": {"messages": [raw_message]}},
+        ):
+            result = gmail_syncer._get_thread_messages("test@gmail.com", "thread-1")
+
+        assert result[0]["body"] == "Full untruncated email body"
+        assert result[0]["rfc822_message_id"] == "<lossless@example.com>"
+        assert result[0]["headers"]["received"] == ["first-hop", "second-hop"]
+        assert result[0]["attachments"] == [
+            {
+                "filename": "contract.pdf",
+                "mime_type": "application/pdf",
+                "attachment_id": "att-1",
+                "size": 99,
+            }
+        ]
+        assert result[0]["raw_message"] == raw_message
+
     def test_thread_without_nested_thread_key(self, gmail_syncer):
         """Response has messages at top level (no 'thread' wrapper)."""
         raw_response = {
@@ -1334,11 +1388,26 @@ class TestGmailMsgToRecord:
         assert record is not None
         assert "fallback_id" in record["id"]
 
-    def test_body_truncation(self, gmail_syncer):
+    def test_body_is_not_truncated(self, gmail_syncer):
         msg = {"message_id": "x", "body": "A" * 6000}
         record = gmail_syncer._msg_to_record(msg, "test@gmail.com")
-        assert len(record["body"]) < 6000
-        assert "[truncated]" in record["body"]
+        assert record["body"] == "A" * 6000
+
+    def test_record_preserves_rfc822_id_headers_and_raw_message(self, gmail_syncer):
+        msg = {
+            "message_id": "gmail-api-id",
+            "rfc822_message_id": "<rfc822@example.com>",
+            "headers": {"message-id": ["<rfc822@example.com>"], "received": ["hop"]},
+            "attachments": [{"filename": "a.pdf", "attachment_id": "a1"}],
+            "raw_message": {"id": "gmail-api-id", "payload": {"headers": []}},
+        }
+        record = gmail_syncer._msg_to_record(msg, "test@gmail.com")
+
+        assert record["rfc822_message_id"] == "<rfc822@example.com>"
+        assert record["headers"]["received"] == ["hop"]
+        assert record["attachments"][0]["attachment_id"] == "a1"
+        assert record["raw_message"]["id"] == "gmail-api-id"
+        assert record["meta"]["rfc822_message_id"] == "<rfc822@example.com>"
 
     def test_sent_direction_with_awaiting_reply(self, gmail_syncer):
         msg = {"message_id": "s1", "subject": "Sent"}
@@ -1497,6 +1566,36 @@ class TestGmailFetchNew:
         assert len(records) == 2
         assert all(r["type"] == "email" for r in records)
         assert all(r["direction"] == "received" for r in records)
+
+    def test_fetch_new_prefers_full_thread_messages_over_sparse_search_metadata(self, gmail_syncer):
+        gmail_syncer.accounts = ["test@gmail.com"]
+        threads = [
+            {"id": "thread-1", "from": "alice@test.com", "subject": "Sparse", "messageCount": 2},
+        ]
+        full_messages = [
+            {
+                "id": "message-1",
+                "thread_id": "thread-1",
+                "from": "alice@test.com",
+                "to": "test@gmail.com",
+                "subject": "Full",
+                "date": "2026-07-10",
+                "body": "Complete body",
+                "headers": {"message-id": ["<full@example.com>"]},
+                "rfc822_message_id": "<full@example.com>",
+                "raw_message": {"id": "message-1"},
+                "labels": ["INBOX"],
+            }
+        ]
+        with patch.object(gmail_syncer, "_search_threads", return_value=threads), patch.object(
+            gmail_syncer, "_get_thread_messages", return_value=full_messages
+        ):
+            records = list(gmail_syncer.fetch_new(SourceState()))
+
+        assert len(records) == 1
+        assert records[0]["meta"]["message_id"] == "message-1"
+        assert records[0]["rfc822_message_id"] == "<full@example.com>"
+        assert records[0]["body"] == "Complete body"
 
     def test_respects_limit(self, gmail_syncer):
         threads = [

@@ -110,6 +110,25 @@ class TestAppend:
         assert rec._source == "telegram"
         assert rec.data["id"] == "1"
 
+    def test_append_adds_canonical_source_uri(self, store):
+        rec = store.append("bee", {"id": "bee_fact_42", "text": "remember this"})
+        assert rec.data["source_uri"] == "vadimgest://bee/bee_fact_42"
+
+    def test_append_preserves_explicit_source_uri(self, store):
+        rec = store.append(
+            "telegram",
+            {"id": "1", "source_uri": "vadimgest://telegram/123_456"},
+        )
+        assert rec.data["source_uri"] == "vadimgest://telegram/123_456"
+
+    def test_append_replaces_empty_source_uri(self, store):
+        rec = store.append("telegram", {"id": "message-7", "source_uri": ""})
+        assert rec.data["source_uri"] == "vadimgest://telegram/message-7"
+
+    def test_append_uses_line_fallback_when_record_has_no_id(self, store):
+        rec = store.append("local", {"text": "no stable upstream id"})
+        assert rec.data["source_uri"] == "vadimgest://local/line-1"
+
     def test_append_increments_line_numbers(self, store):
         r1 = store.append("src", {"id": "a"})
         r2 = store.append("src", {"id": "b"})
@@ -240,6 +259,25 @@ class TestReadAll:
         records = list(store.read_all("src"))
         ids = [r.data["id"] for r in records]
         assert ids == ["0", "1", "2", "3", "4"]
+
+    def test_read_all_derives_provenance_for_historical_record(self, store):
+        path = store.sources_dir / "bee.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "_line": 7,
+                    "_ingested_at": "2026-07-10T00:00:00Z",
+                    "_source": "bee",
+                    "id": "bee_fact_7",
+                    "source_uri": "",
+                    "text": "historical fact",
+                }
+            )
+            + "\n"
+        )
+
+        record = next(store.read_all("bee"))
+        assert record.data["source_uri"] == "vadimgest://bee/bee_fact_7"
 
     def test_read_all_skips_blank_lines(self, store):
         store.append("src", {"id": "1"})

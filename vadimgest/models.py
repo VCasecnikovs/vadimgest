@@ -4,6 +4,15 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any
 import json
+from urllib.parse import quote
+
+
+def canonical_source_uri(source: str, data: dict, line: int) -> str:
+    existing = str(data.get("source_uri") or "").strip()
+    if existing:
+        return existing
+    identifier = data.get("id") or f"line-{line}"
+    return f"vadimgest://{source}/{quote(str(identifier), safe=':@._~-')}"
 
 
 @dataclass
@@ -90,10 +99,14 @@ class Record:
     def from_jsonl(cls, line: str) -> "Record":
         """Deserialize from JSONL."""
         obj = json.loads(line)
+        line_number = obj.pop("_line")
+        ingested_at = obj.pop("_ingested_at")
+        source = obj.pop("_source")
+        obj["source_uri"] = canonical_source_uri(source, obj, line_number)
         return cls(
-            _line=obj.pop("_line"),
-            _ingested_at=obj.pop("_ingested_at"),
-            _source=obj.pop("_source"),
+            _line=line_number,
+            _ingested_at=ingested_at,
+            _source=source,
             data=obj
         )
 

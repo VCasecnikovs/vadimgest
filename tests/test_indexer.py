@@ -150,10 +150,19 @@ class TestExtractJsonlText:
         assert text == ""
 
     def test_email(self):
-        record = {"type": "email", "subject": "Re: Proposal", "body": "Thanks"}
+        record = {
+            "type": "email",
+            "id": "gmail_account_api-id",
+            "subject": "Re: Proposal",
+            "rfc822_message_id": "<mail@example.com>",
+            "meta": {"message_id": "api-id"},
+            "body": "Thanks",
+        }
         title, text = _extract_jsonl_text(record)
         assert title == "Re: Proposal"
-        assert text == "Thanks"
+        assert "Gmail-API-ID: api-id" in text
+        assert "RFC822-Message-ID: <mail@example.com>" in text
+        assert text.endswith("Thanks")
 
     def test_issue(self):
         record = {"type": "issue", "number": 42, "title": "Bug fix", "body": "Details"}

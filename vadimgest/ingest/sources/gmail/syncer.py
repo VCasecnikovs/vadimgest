@@ -4,6 +4,7 @@ Supports both incoming email sync and outgoing email follow-up tracking.
 Sent emails are stored with `direction: "sent"` and `awaiting_reply: true/false`.
 """
 
+import base64
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -108,23 +109,88 @@ class GmailSyncer(CronSyncer):
         if isinstance(result, dict):
             thread = result.get("thread", result)
             raw_msgs = thread.get("messages", [])
-            # Normalize raw API messages into flat dicts
+            # Normalize for search/triage while retaining the complete API
+            # object so headers, MIME structure, and attachment references are
+            # never discarded by ingestion.
             normalized = []
             for raw in raw_msgs:
-                msg = {"id": raw.get("id", "")}
-                headers = {}
                 payload = raw.get("payload", {})
+                headers = {}
                 for h in payload.get("headers", []):
-                    headers[h.get("name", "").lower()] = h.get("value", "")
-                msg["from"] = headers.get("from", "")
-                msg["to"] = headers.get("to", "")
-                msg["subject"] = headers.get("subject", "")
-                msg["date"] = headers.get("date", "")
-                msg["labels"] = raw.get("labelIds", [])
+                    name = h.get("name", "").lower()
+                    if name:
+                        headers.setdefault(name, []).append(h.get("value", ""))
+                first = lambda name: (headers.get(name) or [""])[0]
+                msg = {
+                    "id": raw.get("id", ""),
+                    "thread_id": raw.get("threadId", thread_id),
+                    "from": first("from"),
+                    "to": first("to"),
+                    "subject": first("subject"),
+                    "date": first("date"),
+                    "rfc822_message_id": first("message-id"),
+                    "headers": headers,
+                    "body": self._extract_payload_body(payload),
+                    "attachments": self._extract_attachments(payload),
+                    "labels": raw.get("labelIds", []),
+                    "internal_date": raw.get("internalDate", ""),
+                    "size_estimate": raw.get("sizeEstimate"),
+                    "snippet": raw.get("snippet", ""),
+                    "raw_message": raw,
+                }
                 normalized.append(msg)
             return normalized
 
         return []
+
+    @staticmethod
+    def _decode_body(data: str) -> str:
+        if not data:
+            return ""
+        try:
+            padded = data + "=" * (-len(data) % 4)
+            return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+        except (ValueError, TypeError):
+            return ""
+
+    @classmethod
+    def _extract_payload_body(cls, payload: dict) -> str:
+        plain = []
+        html = []
+
+        def visit(part: dict) -> None:
+            mime = str(part.get("mimeType", "")).lower()
+            decoded = cls._decode_body((part.get("body") or {}).get("data", ""))
+            if decoded:
+                (html if mime == "text/html" else plain).append(decoded)
+            for child in part.get("parts", []) or []:
+                visit(child)
+
+        visit(payload or {})
+        return "\n".join(plain or html)
+
+    @staticmethod
+    def _extract_attachments(payload: dict) -> list[dict]:
+        attachments = []
+
+        def visit(part: dict) -> None:
+            body = part.get("body") or {}
+            filename = part.get("filename", "")
+            attachment_id = body.get("attachmentId", "")
+            if filename or attachment_id:
+                attachments.append(
+                    {
+                        "filename": filename,
+                        "mime_type": part.get("mimeType", ""),
+                        "attachment_id": attachment_id,
+                        "size": body.get("size", 0),
+                    }
+                )
+            for child in part.get("parts", []) or []:
+                visit(child)
+
+        visit(payload or {})
+        return attachments
 
     def _msg_to_record(self, msg: dict, account: str,
                        direction: str = "received",
@@ -155,10 +221,6 @@ class GmailSyncer(CronSyncer):
         thread_id = msg.get("thread_id", "")
         is_unread = "UNREAD" in labels if isinstance(labels, list) else False
 
-        # Truncate body
-        if body and len(body) > 5000:
-            body = body[:5000] + "... [truncated]"
-
         record = {
             "id": record_id,
             "type": "email",
@@ -172,8 +234,17 @@ class GmailSyncer(CronSyncer):
             "thread_id": thread_id,
             "is_unread": is_unread,
             "direction": direction,
+            "rfc822_message_id": msg.get("rfc822_message_id", ""),
+            "headers": msg.get("headers", {}),
+            "attachments": msg.get("attachments", []),
+            "internal_date": msg.get("internal_date", ""),
+            "size_estimate": msg.get("size_estimate"),
+            "snippet": msg.get("snippet", ""),
+            "raw_message": msg.get("raw_message"),
             "meta": {
                 "message_id": message_id,
+                "rfc822_message_id": msg.get("rfc822_message_id", ""),
+                "thread_id": thread_id,
                 "account": account,
             },
         }
@@ -258,9 +329,23 @@ class GmailSyncer(CronSyncer):
                 if yielded >= limit:
                     break
 
-                # Search results have: id, from, subject, date, labels, messageCount
-                # Include messageCount in msg ID so new messages create new records
                 thread_id = thread.get("id", "")
+                full_messages = self._get_thread_messages(account, thread_id)
+                if full_messages:
+                    for msg in full_messages:
+                        if yielded >= limit:
+                            break
+                        if self._is_account_address(msg.get("from", ""), account):
+                            continue
+                        msg["thread_id"] = thread_id
+                        record = self._msg_to_record(msg, account, direction="received")
+                        if record:
+                            yield record
+                            yielded += 1
+                    continue
+
+                # If the full thread fetch fails, retain sparse search metadata
+                # with a synthetic versioned id rather than dropping the event.
                 msg_count = thread.get("messageCount", 1)
                 msg = {
                     "message_id": f"{thread_id}_mc{msg_count}",

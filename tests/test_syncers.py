@@ -215,15 +215,14 @@ class TestGmailMsgToRecord:
         msg = {"from": "a@b.com", "subject": "No ID"}
         assert gmail_syncer._msg_to_record(msg, "test@gmail.com") is None
 
-    def test_body_truncation(self, gmail_syncer):
+    def test_body_preservation(self, gmail_syncer):
         msg = {
             "message_id": "trunc1",
             "body": "x" * 6000,
             "labels": [],
         }
         record = gmail_syncer._msg_to_record(msg, "test@gmail.com")
-        assert len(record["body"]) < 6000
-        assert record["body"].endswith("... [truncated]")
+        assert record["body"] == "x" * 6000
 
     def test_uses_id_fallback(self, gmail_syncer):
         msg = {"id": "fallback_id", "labels": []}
@@ -1280,12 +1279,20 @@ class TestExtractJsonlText:
         from vadimgest.search.indexer import _extract_jsonl_text
         record = {
             "type": "email",
+            "id": "gmail_account_api-123",
             "subject": "Important Update",
+            "from": "alice@example.com",
+            "to": "vadim@example.com",
+            "date": "2026-07-10",
+            "rfc822_message_id": "<mail@example.com>",
+            "meta": {"message_id": "api-123"},
             "body": "Please review this document.",
         }
         title, text = _extract_jsonl_text(record)
         assert title == "Important Update"
-        assert text == "Please review this document."
+        assert "Gmail-API-ID: api-123" in text
+        assert "RFC822-Message-ID: <mail@example.com>" in text
+        assert text.endswith("Please review this document.")
 
     def test_meeting(self):
         from vadimgest.search.indexer import _extract_jsonl_text

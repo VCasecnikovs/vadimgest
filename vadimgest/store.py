@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterator
 from filelock import FileLock
 
-from .models import Record, SourceState, ConsumerCheckpoint
+from .models import Record, SourceState, ConsumerCheckpoint, canonical_source_uri
 
 
 def _normalize_ts(ts) -> str:
@@ -114,6 +114,8 @@ class DataStore:
             # O(1) line number from state instead of counting file lines
             state = self.get_state(source)
             line_num = state.total_records + 1
+            data = dict(data)
+            data["source_uri"] = canonical_source_uri(source, data, line_num)
 
             record = Record(
                 _line=line_num,

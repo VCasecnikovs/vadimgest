@@ -162,8 +162,17 @@ def _extract_jsonl_text(record: dict) -> tuple[str, str]:
 
     if rtype == "email":
         subject = record.get("subject", "")
-        body = record.get("body") or ""
-        return subject, body
+        body = (record.get("body") or "").strip()
+        parts = [
+            f"Subject: {subject}",
+            f"From: {record.get('from') or ''}",
+            f"To: {record.get('to') or ''}",
+            f"Date: {record.get('date') or ''}",
+            f"Message-ID: {record.get('id') or ''}",
+        ]
+        if body and body != "---":
+            parts.append(body)
+        return subject or record.get("id", "Email"), "\n".join(parts)
 
     if rtype == "issue":
         title = record.get("title", "")
@@ -635,7 +644,8 @@ def index(vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
           db_path: Path = DEFAULT_DB, rebuild: bool = False,
           exclude: set[str] | None = None,
           skills_dir: Path = DEFAULT_SKILLS_DIR,
-          md_only: bool = False) -> dict:
+          md_only: bool = False,
+          rebuild_sources: set[str] | None = None) -> dict:
     """Index all sources. Returns stats dict."""
     conn = get_db(db_path)
 
@@ -646,6 +656,15 @@ def index(vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
         conn.execute("DELETE FROM docs")
         conn.execute("DELETE FROM meta")
         conn.execute("DELETE FROM source_state")
+        conn.commit()
+
+    for source in rebuild_sources or set():
+        if source in ("obsidian", "skills"):
+            raise ValueError("--rebuild-source supports JSONL sources only")
+        conn.execute("DELETE FROM docs WHERE source = ?", (source,))
+        conn.execute("DELETE FROM meta WHERE source = ?", (source,))
+        conn.execute("DELETE FROM source_state WHERE source = ?", (source,))
+    if rebuild_sources:
         conn.commit()
 
     results = {}

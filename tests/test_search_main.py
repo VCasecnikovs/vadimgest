@@ -42,7 +42,10 @@ class TestEnsureIndex:
     def test_skips_when_db_exists(self, tmp_path):
         db = tmp_path / "index.db"
         db.write_text("x")
-        with patch("vadimgest.search.__main__.index") as mock_index:
+        with patch("vadimgest.search.__main__.index") as mock_index, patch(
+            "vadimgest.search.__main__.reindex_stale",
+            return_value={},
+        ):
             _ensure_index(db)
             mock_index.assert_not_called()
 
@@ -330,13 +333,23 @@ class TestMain:
     def test_index_command(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=False, exclude=None, md_only=False)
+            mock_cmd.assert_called_once_with(
+                rebuild=False,
+                exclude=None,
+                md_only=False,
+                rebuild_sources=None,
+            )
 
     @patch("vadimgest.search.__main__.cmd_index")
     def test_index_rebuild(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index", "--rebuild"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=True, exclude=None, md_only=False)
+            mock_cmd.assert_called_once_with(
+                rebuild=True,
+                exclude=None,
+                md_only=False,
+                rebuild_sources=None,
+            )
 
     @patch("vadimgest.search.__main__.cmd_index")
     def test_index_with_exclude(self, mock_cmd):
@@ -346,13 +359,30 @@ class TestMain:
                 rebuild=False,
                 exclude={"telegram", "signal"},
                 md_only=False,
+                rebuild_sources=None,
             )
 
     @patch("vadimgest.search.__main__.cmd_index")
     def test_index_md_only_command(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index", "--md-only"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=False, exclude=None, md_only=True)
+            mock_cmd.assert_called_once_with(
+                rebuild=False,
+                exclude=None,
+                md_only=True,
+                rebuild_sources=None,
+            )
+
+    @patch("vadimgest.search.__main__.cmd_index")
+    def test_index_rebuild_source(self, mock_cmd):
+        with patch("sys.argv", [
+            "vadimgest search",
+            "index",
+            "--rebuild-source",
+            "gmail",
+        ]):
+            main()
+            assert mock_cmd.call_args.kwargs["rebuild_sources"] == {"gmail"}
 
     @patch("vadimgest.search.__main__.cmd_stats")
     def test_stats_command(self, mock_cmd):

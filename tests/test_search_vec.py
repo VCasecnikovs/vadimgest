@@ -16,6 +16,7 @@ from vadimgest.search.indexer import (
     index_embeddings,
     embed_stats,
     _content_hash,
+    _extract_jsonl_text,
 )
 from vadimgest.search.searcher import search, search_semantic, search_hybrid, Result
 from vadimgest.search.embedder import Embedder, GeminiEmbedder, get_embedder
@@ -26,6 +27,22 @@ from vadimgest.search.embedder import Embedder, GeminiEmbedder, get_embedder
 
 def test_default_jsonl_dir_uses_configured_data_lake():
     assert DEFAULT_JSONL_DIR == get_sources_dir()
+
+
+def test_email_metadata_remains_searchable_without_body():
+    title, text = _extract_jsonl_text({
+        "type": "email",
+        "id": "gmail_account_message-123",
+        "subject": "Quarterly terms",
+        "from": "alice@example.com",
+        "to": "vadim@example.com",
+        "date": "2026-07-10",
+        "body": "---",
+    })
+
+    assert title == "Quarterly terms"
+    assert "alice@example.com" in text
+    assert "gmail_account_message-123" in text
 
 @pytest.fixture
 def tmp_db(tmp_path):

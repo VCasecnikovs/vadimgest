@@ -24,6 +24,7 @@ Usage:
     # Index management
     vadimgest search index                      # Build/update FTS5 index
     vadimgest search index --rebuild            # Full rebuild
+    vadimgest search index --rebuild-source gmail
     vadimgest search stats                      # Index statistics
 
     # Embedding management
@@ -127,13 +128,17 @@ def cmd_search_hybrid(query: str, n: int = 10, source: str | None = None,
 
 def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
               vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
-              db_path: Path = DEFAULT_DB, md_only: bool = False):
+              db_path: Path = DEFAULT_DB, md_only: bool = False,
+              rebuild_sources: set[str] | None = None):
     print(f"Indexing...")
     if exclude:
         print(f"  Excluding: {', '.join(sorted(exclude))}")
+    if rebuild_sources:
+        print(f"  Rebuilding sources: {', '.join(sorted(rebuild_sources))}")
     t0 = time.time()
     results = index(vault=vault, jsonl_dir=jsonl_dir, db_path=db_path,
-                    rebuild=rebuild, exclude=exclude, md_only=md_only)
+                    rebuild=rebuild, exclude=exclude, md_only=md_only,
+                    rebuild_sources=rebuild_sources)
     dt = time.time() - t0
 
     print(f"Done in {dt:.1f}s:")
@@ -216,14 +221,23 @@ def main():
         rebuild = "--rebuild" in args
         md_only = "--md-only" in args
         exclude = set()
+        rebuild_sources = set()
         i = 1
         while i < len(args):
             if args[i] == "--exclude" and i + 1 < len(args):
                 exclude.add(args[i + 1])
                 i += 2
+            elif args[i] == "--rebuild-source" and i + 1 < len(args):
+                rebuild_sources.add(args[i + 1])
+                i += 2
             else:
                 i += 1
-        cmd_index(rebuild=rebuild, exclude=exclude or None, md_only=md_only)
+        cmd_index(
+            rebuild=rebuild,
+            exclude=exclude or None,
+            md_only=md_only,
+            rebuild_sources=rebuild_sources or None,
+        )
         return
 
     if args[0] == "stats":

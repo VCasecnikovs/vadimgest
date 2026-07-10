@@ -110,7 +110,14 @@ class TestPrintResults:
                               snippet="test", rank=1.0)]
         _print_results(results)
         out = capsys.readouterr().out
-        assert "12345" in out
+        assert "sources/telegram.jsonl#L12346" in out
+
+    def test_json_output_uses_openable_raw_path(self, capsys):
+        results = [MockResult(path="gmail:1", source="gmail", title="Email",
+                              snippet="test", rank=1.0)]
+        _print_results(results, as_json=True)
+        parsed = json.loads(capsys.readouterr().out)
+        assert parsed[0]["path"].endswith("sources/gmail.jsonl#L2")
 
     def test_text_output_no_snippet(self, capsys):
         results = [MockResult(path="a.md", source="md", title="Title",

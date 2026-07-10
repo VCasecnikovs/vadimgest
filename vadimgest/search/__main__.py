@@ -59,6 +59,15 @@ def _ensure_index(db_path: Path):
             print(f"Auto-indexed {added} new: {sources}", file=sys.stderr)
 
 
+def _openable_path(result) -> str:
+    prefix = f"{result.source}:"
+    if result.source not in {"obsidian", "skills"} and result.path.startswith(prefix):
+        line = result.path[len(prefix):]
+        if line.isdigit():
+            return f"{DEFAULT_JSONL_DIR / f'{result.source}.jsonl'}#L{int(line) + 1}"
+    return result.path.split(":", 1)[1] if ":" in result.path else result.path
+
+
 def _print_results(results, as_json: bool = False):
     """Format and print search results."""
     if not results:
@@ -66,7 +75,7 @@ def _print_results(results, as_json: bool = False):
         return
 
     if as_json:
-        out = [{"path": r.path, "source": r.source, "title": r.title,
+        out = [{"path": _openable_path(r), "source": r.source, "title": r.title,
                 "snippet": r.snippet, "rank": r.rank,
                 "chat": r.chat, "folder": r.folder}
                for r in results]
@@ -77,7 +86,7 @@ def _print_results(results, as_json: bool = False):
         src_tag = f"\033[36m[{r.source}]\033[0m "
         chat_tag = f"\033[35m{r.chat}\033[0m " if r.chat else ""
         print(f"\033[1m{i}. {src_tag}{chat_tag}{r.title}\033[0m")
-        display_path = r.path.split(":", 1)[1] if ":" in r.path else r.path
+        display_path = _openable_path(r)
         print(f"   {display_path}")
         if r.snippet:
             snippet = r.snippet.replace(">>>", "\033[33m").replace("<<<", "\033[0m")

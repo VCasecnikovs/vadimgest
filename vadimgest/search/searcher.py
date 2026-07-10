@@ -1,11 +1,16 @@
 """FTS5 + vector search engine."""
 
 import sqlite3
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .indexer import DEFAULT_DB, get_db, get_vec_db
 from .scoring import extract_document_memory_score, memory_boost
+
+
+def _literal_fts_query(query: str) -> str:
+    return " AND ".join(f'"{token}"' for token in re.findall(r"\w+", query))
 
 
 @dataclass
@@ -69,14 +74,24 @@ def search(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
 
     content_col = "content" if full else "snippet(docs, 3, '>>>', '<<<', '...', 40)"
 
-    rows = conn.execute(f"""
+    sql = f"""
         SELECT path, source, title, {content_col}, rank, chat, folder
         FROM docs
         WHERE docs MATCH ? {where_extra}
         {filter_clause}
         ORDER BY rank
         LIMIT ?
-    """, (fts_query, *filter_params, n)).fetchall()
+    """
+    try:
+        rows = conn.execute(sql, (fts_query, *filter_params, n)).fetchall()
+    except sqlite3.OperationalError:
+        literal_query = _literal_fts_query(query)
+        if not literal_query:
+            conn.close()
+            return []
+        if source:
+            literal_query = f'source:"{source}" AND ({literal_query})'
+        rows = conn.execute(sql, (literal_query, *filter_params, n)).fetchall()
 
     conn.close()
 

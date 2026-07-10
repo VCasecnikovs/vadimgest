@@ -329,6 +329,20 @@ class TestSearchHybrid:
 
         assert len(results) <= 2
 
+    def test_hybrid_accepts_hyphenated_natural_language(self, tmp_db):
+        """Regression: `write-time` was parsed as an FTS column expression."""
+        self._setup_embeddings(tmp_db)
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            results = search_hybrid(
+                "write-time memory",
+                n=5,
+                db_path=tmp_db,
+                md=True,
+                provider="fake",
+            )
+
+        assert isinstance(results, list)
+
     def test_hybrid_uses_memory_score_as_bounded_tiebreaker(self, tmp_db):
         conn = get_db(tmp_db)
         conn.execute(

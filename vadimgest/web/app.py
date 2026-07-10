@@ -5894,7 +5894,7 @@ async function loadSearchSettings() {
     html += '<input type="text" id="search-index-db" value="' + escHtml(cfg.index_db || '') + '"></div>';
     html += '<div class="field"><label>Embedding Provider</label>';
     html += '<select id="search-embed-provider" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:13px">';
-    const providers = [["", "None (FTS only)"], ["gemini", "Gemini (free tier)"], ["openai", "OpenAI"], ["ollama", "Ollama (local)"]];
+    const providers = [["", "None (FTS only)"], ["local", "Local BGE (no API key)"], ["gemini", "Gemini (free tier)"], ["openai", "OpenAI"], ["ollama", "Ollama"]];
     providers.forEach(([val, label]) => {
       html += '<option value="' + val + '"' + (cfg.embedding_provider === val ? ' selected' : '') + '>' + label + '</option>';
     });

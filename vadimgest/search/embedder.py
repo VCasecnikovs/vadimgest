@@ -140,7 +140,31 @@ class OllamaEmbedder(Embedder):
         return results
 
 
-PROVIDERS = {"gemini": GeminiEmbedder, "openai": OpenAIEmbedder, "ollama": OllamaEmbedder}
+class LocalEmbedder(Embedder):
+    """Local BGE embeddings through fastembed, with no API key."""
+
+    _MODEL = "BAAI/bge-base-en-v1.5"
+    _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+    def __init__(self):
+        from fastembed import TextEmbedding
+
+        self._model = TextEmbedding(model_name=self._MODEL)
+
+    def embed(self, texts: list[str], task: str = "document") -> list[list[float]]:
+        if task == "query":
+            texts = [self._QUERY_PREFIX + text for text in texts]
+        else:
+            texts = [text[:4000] for text in texts]
+        return [vector.tolist() for vector in self._model.embed(texts)]
+
+
+PROVIDERS = {
+    "gemini": GeminiEmbedder,
+    "openai": OpenAIEmbedder,
+    "ollama": OllamaEmbedder,
+    "local": LocalEmbedder,
+}
 
 
 def get_embedder(provider: str = "gemini") -> Embedder:

@@ -120,13 +120,13 @@ def cmd_search_hybrid(query: str, n: int = 10, source: str | None = None,
 
 def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
               vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
-              db_path: Path = DEFAULT_DB):
+              db_path: Path = DEFAULT_DB, md_only: bool = False):
     print(f"Indexing...")
     if exclude:
         print(f"  Excluding: {', '.join(sorted(exclude))}")
     t0 = time.time()
     results = index(vault=vault, jsonl_dir=jsonl_dir, db_path=db_path,
-                    rebuild=rebuild, exclude=exclude)
+                    rebuild=rebuild, exclude=exclude, md_only=md_only)
     dt = time.time() - t0
 
     print(f"Done in {dt:.1f}s:")
@@ -148,11 +148,17 @@ def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
     print(f"  {'TOTAL':20} +{total_added:>6}")
 
 
-def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_DB):
+def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_DB,
+              rebuild: bool = False):
     from .indexer import index_embeddings
     print(f"Embedding with {provider}...", file=sys.stderr, flush=True)
     t0 = time.time()
-    result = index_embeddings(db_path=db_path, provider=provider, limit=limit)
+    result = index_embeddings(
+        db_path=db_path,
+        provider=provider,
+        limit=limit,
+        rebuild=rebuild,
+    )
     dt = time.time() - t0
     print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
           f"skipped={result['skipped']}, total={result['total']}")
@@ -164,6 +170,7 @@ def cmd_embed_stats(db_path: Path = DEFAULT_DB):
     print(f"Total docs: {s['total_docs']}")
     print(f"Embedded:   {s['embedded']}")
     print(f"Coverage:   {s['coverage']}%")
+    print(f"Space:      {s.get('embedding_space') or 'unknown'}")
 
 
 def cmd_stats(db_path: Path = DEFAULT_DB):
@@ -192,6 +199,7 @@ def main():
 
     if args[0] == "index":
         rebuild = "--rebuild" in args
+        md_only = "--md-only" in args
         exclude = set()
         i = 1
         while i < len(args):
@@ -200,7 +208,7 @@ def main():
                 i += 2
             else:
                 i += 1
-        cmd_index(rebuild=rebuild, exclude=exclude or None)
+        cmd_index(rebuild=rebuild, exclude=exclude or None, md_only=md_only)
         return
 
     if args[0] == "stats":
@@ -211,6 +219,7 @@ def main():
         provider = None
         limit = None
         show_stats = False
+        rebuild = False
         i = 1
         while i < len(args):
             if args[i] == "--provider" and i + 1 < len(args):
@@ -222,15 +231,18 @@ def main():
             elif args[i] == "--stats":
                 show_stats = True
                 i += 1
+            elif args[i] == "--rebuild":
+                rebuild = True
+                i += 1
             else:
                 i += 1
         if show_stats:
             cmd_embed_stats()
         elif not provider:
-            print("Error: --provider required. Use: --provider gemini|openai|ollama")
+            print("Error: --provider required. Use: --provider local|gemini|openai|ollama")
             sys.exit(1)
         else:
-            cmd_embed(provider=provider, limit=limit)
+            cmd_embed(provider=provider, limit=limit, rebuild=rebuild)
         return
 
     # --- Search mode ---

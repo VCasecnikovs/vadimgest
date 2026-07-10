@@ -106,6 +106,12 @@ def get_vec_db(db_path: Path = DEFAULT_DB):
             embedding float[768]
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vec_meta(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 
@@ -190,6 +196,7 @@ def _extract_jsonl_meta(record: dict) -> tuple[str, str]:
 
 def index_obsidian(conn: sqlite3.Connection, vault: Path) -> dict:
     """Index Obsidian vault .md files. Returns stats."""
+    vault = vault.expanduser().resolve()
     existing = {}
     for row in conn.execute("SELECT path, mtime FROM meta WHERE source = 'obsidian'"):
         existing[row[0]] = row[1]
@@ -245,6 +252,7 @@ def index_obsidian(conn: sqlite3.Connection, vault: Path) -> dict:
 
 def index_skills(conn: sqlite3.Connection, skills_dir: Path = DEFAULT_SKILLS_DIR) -> dict:
     """Index SKILL.md files from skills directory."""
+    skills_dir = skills_dir.expanduser().resolve()
     if not skills_dir.exists():
         return {"total": 0, "added": 0, "unchanged": 0, "removed": 0}
 
@@ -311,7 +319,8 @@ def _content_hash(text: str) -> str:
 
 
 def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
-                     batch_size: int = 10, limit: int | None = None) -> dict:
+                     batch_size: int = 10, limit: int | None = None,
+                     rebuild: bool = False) -> dict:
     """Generate embeddings for docs that don't have them yet.
 
     Uses content hash to skip unchanged docs. Writes to vec_docs table.
@@ -322,6 +331,35 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
 
     # Use single pysqlite3 connection for everything (avoids WAL lock conflicts)
     conn = get_vec_db(db_path)
+
+    model = getattr(embedder, "_MODEL", None) or getattr(embedder, "model", None)
+    model = model or embedder.__class__.__name__
+    desired_space = f"{provider}:{model}:{embedder.dim}"
+    current_row = conn.execute(
+        "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
+    ).fetchone()
+    current_space = current_row[0] if current_row else None
+    vector_count = conn.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+
+    if vector_count and current_space != desired_space:
+        if not rebuild:
+            conn.close()
+            actual = current_space or "unknown legacy space"
+            raise RuntimeError(
+                f"embedding space mismatch: index={actual}, requested={desired_space}. "
+                "Re-run with rebuild=True / --rebuild to replace all vectors."
+            )
+        conn.execute("DELETE FROM vec_docs")
+        vector_count = 0
+    elif rebuild and vector_count:
+        conn.execute("DELETE FROM vec_docs")
+        vector_count = 0
+
+    conn.execute(
+        "INSERT OR REPLACE INTO vec_meta(key, value) VALUES ('embedding_space', ?)",
+        (desired_space,),
+    )
+    conn.commit()
 
     # Get existing embeddings
     existing_vec = set()
@@ -356,7 +394,12 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
 
     if not to_embed:
         conn.close()
-        return {"total": len(rows), "embedded": 0, "skipped": len(rows)}
+        return {
+            "total": len(rows),
+            "embedded": 0,
+            "skipped": len(rows),
+            "embedding_space": desired_space,
+        }
 
     embedded = 0
     for i in range(0, len(to_embed), batch_size):
@@ -387,7 +430,12 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         conn.commit()
 
     conn.close()
-    return {"total": len(rows), "embedded": embedded, "skipped": len(rows) - len(to_embed)}
+    return {
+        "total": len(rows),
+        "embedded": embedded,
+        "skipped": len(rows) - len(to_embed),
+        "embedding_space": desired_space,
+    }
 
 
 def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
@@ -402,12 +450,22 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
     try:
         conn_vec = get_vec_db(db_path)
         embedded = conn_vec.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+        row = conn_vec.execute(
+            "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
+        ).fetchone()
+        embedding_space = row[0] if row else None
         conn_vec.close()
     except Exception:
         embedded = 0
+        embedding_space = None
 
     pct = (embedded / total * 100) if total > 0 else 0
-    return {"total_docs": total, "embedded": embedded, "coverage": round(pct, 1)}
+    return {
+        "total_docs": total,
+        "embedded": embedded,
+        "coverage": round(pct, 1),
+        "embedding_space": embedding_space,
+    }
 
 
 def _count_lines(path: Path) -> int:
@@ -526,7 +584,8 @@ def reindex_stale(db_path: Path = DEFAULT_DB, jsonl_dir: Path = DEFAULT_JSONL_DI
 def index(vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
           db_path: Path = DEFAULT_DB, rebuild: bool = False,
           exclude: set[str] | None = None,
-          skills_dir: Path = DEFAULT_SKILLS_DIR) -> dict:
+          skills_dir: Path = DEFAULT_SKILLS_DIR,
+          md_only: bool = False) -> dict:
     """Index all sources. Returns stats dict."""
     conn = get_db(db_path)
 
@@ -551,7 +610,7 @@ def index(vault: Path = DEFAULT_VAULT, jsonl_dir: Path = DEFAULT_JSONL_DIR,
 
     # JSONL sources (skip obsidian and skills - indexed from files directly)
     jsonl_skip = exclude | {"obsidian", "skills"}
-    if jsonl_dir.exists():
+    if not md_only and jsonl_dir.exists():
         for jsonl_file in sorted(jsonl_dir.glob("*.jsonl")):
             source = jsonl_file.stem
             if source in jsonl_skip:

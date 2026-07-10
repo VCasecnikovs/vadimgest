@@ -34,6 +34,7 @@ search = [
     "pysqlite3>=0.6.0",
     "sqlite-vec>=0.1.6",
     "httpx>=0.28",
+    "fastembed>=0.8.0",
 ]
 web = ["flask>=3.0"]
 compression = ["headroom-ai[proxy]>=0.26.0"]
@@ -43,6 +44,7 @@ all = [
     "pysqlite3>=0.6.0",
     "sqlite-vec>=0.1.6",
     "httpx>=0.28",
+    "fastembed>=0.8.0",
     "flask>=3.0",
 ]
 

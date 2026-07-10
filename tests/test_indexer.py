@@ -375,6 +375,24 @@ class TestIndexObsidian:
 
         conn.close()
 
+    def test_indexes_vault_when_configured_path_is_a_symlink(self, tmp_path):
+        real_vault = tmp_path / "real-vault"
+        real_vault.mkdir()
+        (real_vault / "memory.md").write_text("# Memory\nDurable fact")
+        linked_vault = tmp_path / "linked-vault"
+        linked_vault.symlink_to(real_vault, target_is_directory=True)
+
+        db_path = tmp_path / "test.db"
+        conn = get_db(db_path)
+        result = index_obsidian(conn, linked_vault)
+        conn.commit()
+
+        assert result["added"] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM docs WHERE path = 'obsidian:memory.md'"
+        ).fetchone()[0] == 1
+        conn.close()
+
     def test_skips_unchanged_files(self, tmp_path):
         vault = tmp_path / "vault"
         vault.mkdir()

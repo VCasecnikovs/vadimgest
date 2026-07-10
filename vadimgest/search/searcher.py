@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .indexer import DEFAULT_DB, get_db, get_vec_db
+from .scoring import extract_document_memory_score, memory_boost
 
 
 @dataclass
@@ -175,6 +176,19 @@ def search_hybrid(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
         scores[r.path] = scores.get(r.path, 0) + 1.0 / (rrf_k + rank)
         if r.path not in result_map:
             result_map[r.path] = r
+
+    if scores:
+        conn = get_db(db_path)
+        placeholders = ",".join("?" for _ in scores)
+        rows = conn.execute(
+            f"SELECT path, content FROM docs WHERE path IN ({placeholders})",
+            tuple(scores),
+        ).fetchall()
+        conn.close()
+        content_by_path = dict(rows)
+        for path in scores:
+            fact_score = extract_document_memory_score(content_by_path.get(path, ""))
+            scores[path] *= memory_boost(fact_score)
 
     sorted_paths = sorted(scores.keys(), key=lambda p: -scores[p])
 

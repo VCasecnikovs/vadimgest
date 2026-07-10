@@ -181,6 +181,29 @@ class TestIndexEmbeddings:
         assert r2["embedded"] == 0
         assert r2["skipped"] == 4
 
+    def test_rejects_mixed_or_unknown_embedding_space(self, tmp_db):
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            index_embeddings(db_path=tmp_db, provider="provider-a")
+            with pytest.raises(RuntimeError, match="embedding space"):
+                index_embeddings(db_path=tmp_db, provider="provider-b")
+
+    def test_rebuild_allows_intentional_provider_change(self, tmp_db):
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            index_embeddings(db_path=tmp_db, provider="provider-a")
+            result = index_embeddings(
+                db_path=tmp_db,
+                provider="provider-b",
+                rebuild=True,
+            )
+
+        assert result["embedded"] == 4
+        conn = get_vec_db(tmp_db)
+        space = conn.execute(
+            "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
+        ).fetchone()[0]
+        conn.close()
+        assert space.startswith("provider-b:")
+
     def test_limit_parameter(self, tmp_db):
         """Limit should cap the number of docs embedded."""
         with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
@@ -305,6 +328,28 @@ class TestSearchHybrid:
             results = search_hybrid("data", n=2, db_path=tmp_db, md=True, provider="fake")
 
         assert len(results) <= 2
+
+    def test_hybrid_uses_memory_score_as_bounded_tiebreaker(self, tmp_db):
+        conn = get_db(tmp_db)
+        conn.execute(
+            "UPDATE docs SET content = content || ? WHERE path = ?",
+            ("\n- **memory-score:** `2.0`", "obsidian:People/Alice.md"),
+        )
+        conn.execute(
+            "UPDATE docs SET content = content || ? WHERE path = ?",
+            ("\n- **memory-score:** `9.0`", "obsidian:People/Bob.md"),
+        )
+        conn.commit()
+        conn.close()
+
+        alice = Result("obsidian:People/Alice.md", "obsidian", "Alice", "", 0.0)
+        bob = Result("obsidian:People/Bob.md", "obsidian", "Bob", "", 0.0)
+        with patch("vadimgest.search.searcher.search", return_value=[alice, bob]), patch(
+            "vadimgest.search.searcher.search_semantic", return_value=[bob, alice]
+        ):
+            results = search_hybrid("query", n=2, db_path=tmp_db, md=True)
+
+        assert [result.title for result in results] == ["Bob", "Alice"]
 
 
 # -- content_hash tests --

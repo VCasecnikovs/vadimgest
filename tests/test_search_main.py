@@ -29,6 +29,7 @@ from vadimgest.search.__main__ import (
     cmd_search_hybrid,
     cmd_index,
     cmd_stats,
+    cmd_embed,
     cmd_embed_stats,
     main,
 )
@@ -175,6 +176,17 @@ class TestCmdSearchHybrid:
         assert mock_hybrid.call_args[1]["provider"] == "openai"
 
 
+class TestCmdEmbed:
+    @patch("vadimgest.search.indexer.index_embeddings", return_value={
+        "embedded": 0,
+        "skipped": 0,
+        "total": 0,
+    })
+    def test_rebuild_is_explicit(self, mock_index, tmp_path):
+        cmd_embed("local", rebuild=True, db_path=tmp_path / "db")
+        assert mock_index.call_args.kwargs["rebuild"] is True
+
+
 # ── cmd_index ──
 
 
@@ -210,6 +222,16 @@ class TestCmdIndex:
         cmd_index(exclude={"telegram", "signal"}, vault=tmp_path, jsonl_dir=tmp_path, db_path=tmp_path / "db")
         out = capsys.readouterr().out
         assert "Excluding" in out
+
+    @patch("vadimgest.search.__main__.index", return_value={})
+    def test_index_md_only(self, mock_index, tmp_path):
+        cmd_index(
+            vault=tmp_path,
+            jsonl_dir=tmp_path,
+            db_path=tmp_path / "db",
+            md_only=True,
+        )
+        assert mock_index.call_args.kwargs["md_only"] is True
 
 
 # ── cmd_stats ──
@@ -273,19 +295,29 @@ class TestMain:
     def test_index_command(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=False, exclude=None)
+            mock_cmd.assert_called_once_with(rebuild=False, exclude=None, md_only=False)
 
     @patch("vadimgest.search.__main__.cmd_index")
     def test_index_rebuild(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index", "--rebuild"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=True, exclude=None)
+            mock_cmd.assert_called_once_with(rebuild=True, exclude=None, md_only=False)
 
     @patch("vadimgest.search.__main__.cmd_index")
     def test_index_with_exclude(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "index", "--exclude", "telegram", "--exclude", "signal"]):
             main()
-            mock_cmd.assert_called_once_with(rebuild=False, exclude={"telegram", "signal"})
+            mock_cmd.assert_called_once_with(
+                rebuild=False,
+                exclude={"telegram", "signal"},
+                md_only=False,
+            )
+
+    @patch("vadimgest.search.__main__.cmd_index")
+    def test_index_md_only_command(self, mock_cmd):
+        with patch("sys.argv", ["vadimgest search", "index", "--md-only"]):
+            main()
+            mock_cmd.assert_called_once_with(rebuild=False, exclude=None, md_only=True)
 
     @patch("vadimgest.search.__main__.cmd_stats")
     def test_stats_command(self, mock_cmd):
@@ -303,13 +335,25 @@ class TestMain:
     def test_embed_with_provider(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "embed", "--provider", "gemini"]):
             main()
-            mock_cmd.assert_called_once_with(provider="gemini", limit=None)
+            mock_cmd.assert_called_once_with(provider="gemini", limit=None, rebuild=False)
 
     @patch("vadimgest.search.__main__.cmd_embed")
     def test_embed_with_limit(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "embed", "--provider", "ollama", "--limit", "100"]):
             main()
-            mock_cmd.assert_called_once_with(provider="ollama", limit=100)
+            mock_cmd.assert_called_once_with(provider="ollama", limit=100, rebuild=False)
+
+    @patch("vadimgest.search.__main__.cmd_embed")
+    def test_embed_rebuild(self, mock_cmd):
+        with patch("sys.argv", [
+            "vadimgest search",
+            "embed",
+            "--provider",
+            "local",
+            "--rebuild",
+        ]):
+            main()
+            mock_cmd.assert_called_once_with(provider="local", limit=None, rebuild=True)
 
     def test_embed_no_provider(self):
         with patch("sys.argv", ["vadimgest search", "embed"]):

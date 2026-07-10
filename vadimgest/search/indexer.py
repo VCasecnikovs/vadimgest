@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from ..config import get_search_config
+from ..config import get_search_config, get_sources_dir
 
 
 def _configured_search_paths() -> tuple[Path, Path, Path]:
@@ -19,7 +19,7 @@ def _configured_search_paths() -> tuple[Path, Path, Path]:
 
 
 DEFAULT_VAULT, DEFAULT_SKILLS_DIR, DEFAULT_DB = _configured_search_paths()
-DEFAULT_JSONL_DIR = Path(__file__).parent.parent / "data" / "sources"
+DEFAULT_JSONL_DIR = get_sources_dir()
 
 SCHEMA_VERSION = 5  # keep at 5 - use ALTER TABLE for new columns
 DEFAULT_EMBED_SOURCES = ("obsidian", "skills")
@@ -390,14 +390,17 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         pass
 
     placeholders = ','.join('?' * len(active_sources))
-    rows = conn.execute(f"""
-        SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
-        FROM docs JOIN meta ON docs.path = meta.path
-        WHERE docs.source IN ({placeholders})
-        ORDER BY docs.rowid
-    """, active_sources).fetchall()
-
-    valid_vec_ids = {row[0] for row in rows}
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM docs WHERE source IN ({placeholders})",
+        active_sources,
+    ).fetchone()[0]
+    valid_vec_ids = {
+        row[0]
+        for row in conn.execute(
+            f"SELECT rowid FROM docs WHERE source IN ({placeholders})",
+            active_sources,
+        )
+    }
     stale_vec_ids = existing_vec - valid_vec_ids
     for doc_id in stale_vec_ids:
         conn.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
@@ -406,36 +409,18 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         existing_vec -= stale_vec_ids
     pruned = len(stale_vec_ids)
 
-    to_embed = []
-    for rowid, path, source, content, old_hash in rows:
-        if limit and len(to_embed) >= limit:
-            break
-        h = _content_hash(content)
-        if rowid in existing_vec and old_hash == h:
-            continue
-        to_embed.append((rowid, path, source, content, h))
-
-    if not to_embed:
-        conn.close()
-        return {
-            "total": len(rows),
-            "embedded": 0,
-            "skipped": len(rows),
-            "pruned": pruned,
-            "embedding_space": desired_space,
-            "sources": list(active_sources),
-        }
-
     embedded = 0
-    for i in range(0, len(to_embed), batch_size):
-        batch = to_embed[i:i + batch_size]
+    selected = 0
+
+    def embed_batch(batch: list[tuple]) -> None:
+        nonlocal embedded
         texts = [item[3][:8000] for item in batch]
 
         try:
             vectors = embedder.embed(texts)
         except Exception as e:
-            print(f"  Embedding error at batch {i}: {e}", file=sys.stderr)
-            continue
+            print(f"  Embedding error after {embedded} docs: {e}", file=sys.stderr)
+            return
 
         for (rowid, path, source, content, h), vec in zip(batch, vectors):
             blob = Embedder.serialize(vec)
@@ -449,16 +434,40 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             )
 
         embedded += len(batch)
-        if embedded % 200 == 0 or i + batch_size >= len(to_embed):
-            print(f"  Embedded {embedded}/{len(to_embed)}...", file=sys.stderr, flush=True)
+        if embedded % 200 == 0:
+            print(f"  Embedded {embedded}...", file=sys.stderr, flush=True)
 
         conn.commit()
 
+    batch = []
+    row_cursor = conn.execute(f"""
+        SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
+        FROM docs JOIN meta ON docs.path = meta.path
+        WHERE docs.source IN ({placeholders})
+        ORDER BY docs.rowid
+    """, active_sources)
+    for rowid, path, source, content, old_hash in row_cursor:
+        h = _content_hash(content)
+        if rowid in existing_vec and old_hash == h:
+            continue
+        if limit is not None and selected >= limit:
+            break
+        batch.append((rowid, path, source, content, h))
+        selected += 1
+        if len(batch) >= batch_size:
+            embed_batch(batch)
+            batch = []
+
+    if batch:
+        embed_batch(batch)
+    if embedded and embedded % 200:
+        print(f"  Embedded {embedded}/{selected}...", file=sys.stderr, flush=True)
+
     conn.close()
     return {
-        "total": len(rows),
+        "total": total,
         "embedded": embedded,
-        "skipped": len(rows) - len(to_embed),
+        "skipped": total - selected,
         "pruned": pruned,
         "embedding_space": desired_space,
         "sources": list(active_sources),

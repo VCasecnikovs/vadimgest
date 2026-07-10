@@ -8,12 +8,24 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from vadimgest.search.indexer import get_db, get_vec_db, index_embeddings, embed_stats, _content_hash
+from vadimgest.config import get_sources_dir
+from vadimgest.search.indexer import (
+    DEFAULT_JSONL_DIR,
+    get_db,
+    get_vec_db,
+    index_embeddings,
+    embed_stats,
+    _content_hash,
+)
 from vadimgest.search.searcher import search, search_semantic, search_hybrid, Result
 from vadimgest.search.embedder import Embedder, GeminiEmbedder, get_embedder
 
 
 # -- Fixtures --
+
+
+def test_default_jsonl_dir_uses_configured_data_lake():
+    assert DEFAULT_JSONL_DIR == get_sources_dir()
 
 @pytest.fixture
 def tmp_db(tmp_path):

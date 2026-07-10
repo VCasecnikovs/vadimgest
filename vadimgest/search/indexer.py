@@ -328,6 +328,14 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _embedding_text(source: str, content: str) -> str:
+    """Keep raw semantic batches compact while retaining both ends of a record."""
+    if source in DEFAULT_EMBED_SOURCES or len(content) <= 1600:
+        return content[:8000]
+    half = 797
+    return f"{content[:half]}\n...\n{content[-half:]}"
+
+
 def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
                      batch_size: int = 10, limit: int | None = None,
                      rebuild: bool = False,
@@ -424,7 +432,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
 
     def embed_batch(batch: list[tuple]) -> None:
         nonlocal embedded
-        texts = [item[3][:8000] for item in batch]
+        texts = [_embedding_text(item[2], item[3]) for item in batch]
 
         try:
             vectors = embedder.embed(texts)
@@ -463,7 +471,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             continue
         if limit is not None and selected >= limit:
             break
-        content_chars = min(len(content), 8000)
+        content_chars = len(_embedding_text(source, content))
         if batch and (len(batch) >= batch_size or batch_chars + content_chars > max_batch_chars):
             embed_batch(batch)
             batch = []

@@ -17,6 +17,7 @@ from vadimgest.search.indexer import (
     embed_stats,
     _content_hash,
     _extract_jsonl_text,
+    _embedding_text,
 )
 from vadimgest.search.searcher import search, search_semantic, search_hybrid, Result
 from vadimgest.search.embedder import Embedder, GeminiEmbedder, get_embedder
@@ -43,6 +44,20 @@ def test_email_metadata_remains_searchable_without_body():
     assert title == "Quarterly terms"
     assert "alice@example.com" in text
     assert "gmail_account_message-123" in text
+
+
+def test_raw_embedding_text_keeps_both_ends_with_bounded_size():
+    content = "START" + ("x" * 5000) + "END"
+    embedded = _embedding_text("signal", content)
+
+    assert embedded.startswith("START")
+    assert embedded.endswith("END")
+    assert len(embedded) <= 1600
+
+
+def test_obsidian_embedding_text_keeps_longer_context():
+    content = "x" * 5000
+    assert _embedding_text("obsidian", content) == content
 
 @pytest.fixture
 def tmp_db(tmp_path):

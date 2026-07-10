@@ -6,11 +6,20 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from ..config import get_search_config
 
-DEFAULT_VAULT = Path.home() / "Documents" / "Notes"
+
+def _configured_search_paths() -> tuple[Path, Path, Path]:
+    config = get_search_config()
+    return (
+        Path(config["vault_path"]),
+        Path(config["skills_dir"]),
+        Path(config["index_db"]),
+    )
+
+
+DEFAULT_VAULT, DEFAULT_SKILLS_DIR, DEFAULT_DB = _configured_search_paths()
 DEFAULT_JSONL_DIR = Path(__file__).parent.parent / "data" / "sources"
-DEFAULT_SKILLS_DIR = Path.home() / ".claude" / "skills"
-DEFAULT_DB = Path.home() / ".vadimsearch" / "index.db"
 
 SCHEMA_VERSION = 5  # keep at 5 - use ALTER TABLE for new columns
 

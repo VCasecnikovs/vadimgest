@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 from vadimgest.search.indexer import (
+    _configured_search_paths,
     _extract_title,
     _extract_jsonl_text,
     _extract_jsonl_meta,
@@ -20,6 +21,22 @@ from vadimgest.search.indexer import (
     stats,
     SCHEMA_VERSION,
 )
+
+
+def test_configured_search_paths_follow_vadimgest_config(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    skills = tmp_path / "skills"
+    db = tmp_path / "search.db"
+    monkeypatch.setattr(
+        "vadimgest.search.indexer.get_search_config",
+        lambda: {
+            "vault_path": str(vault),
+            "skills_dir": str(skills),
+            "index_db": str(db),
+        },
+    )
+
+    assert _configured_search_paths() == (vault, skills, db)
 
 
 # ── _extract_title ──

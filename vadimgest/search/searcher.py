@@ -25,13 +25,15 @@ class Result:
 
 
 def search(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
-           source: str | None = None, md: bool = False, raw: bool = False,
+           source: str | None = None, sources: tuple[str, ...] | None = None,
+           md: bool = False, raw: bool = False,
            full: bool = False, chat: str | None = None,
            folder: str | None = None) -> list[Result]:
     """Search the FTS5 index.
 
     Args:
-        source: filter to specific JSONL source (e.g. "telegram")
+        source: filter to one source (backward-compatible shorthand)
+        sources: filter to an explicit source allowlist
         md: include Obsidian vault
         raw: include JSONL sources
         chat: filter by chat/group name (substring match)
@@ -42,24 +44,8 @@ def search(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
 
     conn = get_db(db_path)
 
-    # Build FTS5 query and WHERE filter
-    # --md includes obsidian + skills
-    md_sources = ("obsidian", "skills")
-    if source:
-        fts_query = f'source:"{source}" AND ({query})'
-        where_extra = ""
-    elif md and not raw:
-        fts_query = query
-        src_filter = " OR ".join(f"source = '{s}'" for s in md_sources)
-        where_extra = f"AND ({src_filter})"
-    elif raw and not md:
-        fts_query = query
-        src_filter = " AND ".join(f"source != '{s}'" for s in md_sources)
-        where_extra = f"AND ({src_filter})"
-    else:
-        # Both md and raw
-        fts_query = query
-        where_extra = ""
+    fts_query = query
+    where_extra, source_params = _source_filter_sql(source, sources, md, raw)
 
     # Metadata filters (UNINDEXED columns, filtered via WHERE)
     filter_parts = []
@@ -83,15 +69,19 @@ def search(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
         LIMIT ?
     """
     try:
-        rows = conn.execute(sql, (fts_query, *filter_params, n)).fetchall()
+        rows = conn.execute(
+            sql,
+            (fts_query, *source_params, *filter_params, n),
+        ).fetchall()
     except sqlite3.OperationalError:
         literal_query = _literal_fts_query(query)
         if not literal_query:
             conn.close()
             return []
-        if source:
-            literal_query = f'source:"{source}" AND ({literal_query})'
-        rows = conn.execute(sql, (literal_query, *filter_params, n)).fetchall()
+        rows = conn.execute(
+            sql,
+            (literal_query, *source_params, *filter_params, n),
+        ).fetchall()
 
     conn.close()
 
@@ -102,21 +92,26 @@ def search(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
     ]
 
 
-def _source_filter_sql(source: str | None, md: bool, raw: bool) -> str:
-    """Build SQL WHERE clause for source filtering."""
+def _source_filter_sql(source: str | None, sources: tuple[str, ...] | None,
+                       md: bool, raw: bool) -> tuple[str, tuple[str, ...]]:
+    """Build a parameterized source filter."""
     md_sources = ("obsidian", "skills")
     if source:
-        return f"AND source = '{source}'"
+        sources = (source,)
+    if sources:
+        unique_sources = tuple(dict.fromkeys(s for s in sources if s))
+        placeholders = ",".join("?" for _ in unique_sources)
+        return f"AND source IN ({placeholders})", unique_sources
     if md and not raw:
-        return "AND source IN ('obsidian', 'skills')"
+        return "AND source IN (?, ?)", md_sources
     if raw and not md:
-        excl = ", ".join(f"'{s}'" for s in md_sources)
-        return f"AND source NOT IN ({excl})"
-    return ""
+        return "AND source NOT IN (?, ?)", md_sources
+    return "", ()
 
 
 def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
-                    source: str | None = None, md: bool = False, raw: bool = False,
+                    source: str | None = None, sources: tuple[str, ...] | None = None,
+                    md: bool = False, raw: bool = False,
                     full: bool = False, provider: str = "gemini",
                     chat: str | None = None, folder: str | None = None) -> list[Result]:
     """Pure embedding-based semantic search."""
@@ -129,15 +124,23 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
     conn_vec = get_vec_db(db_path)
     conn_fts = get_db(db_path)
 
-    # KNN query - get more than needed, filter after
-    fetch_n = n * 5  # overfetch to compensate for source/metadata filtering
+    vector_count = conn_vec.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+    if not vector_count:
+        conn_vec.close()
+        conn_fts.close()
+        return []
+
+    # sqlite-vec applies KNN before metadata filters, so filtered searches need
+    # enough candidates to avoid losing a smaller source inside a large corpus.
+    has_filter = bool(source or sources or md or raw or chat or folder)
+    fetch_n = min(vector_count, max(n * 5, 1000 if has_filter else n))
     rows = conn_vec.execute(
         "SELECT doc_id, distance FROM vec_docs WHERE embedding MATCH ? AND k = ? ORDER BY distance",
         (query_blob, fetch_n)
     ).fetchall()
 
     # Build source filter for post-filtering
-    src_sql = _source_filter_sql(source, md, raw)
+    src_sql, src_params = _source_filter_sql(source, sources, md, raw)
 
     results = []
     for doc_id, distance in rows:
@@ -145,7 +148,7 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
             break
         row = conn_fts.execute(
             f"SELECT path, source, title, content, chat, folder FROM docs WHERE rowid = ? {src_sql}",
-            (doc_id,)
+            (doc_id, *src_params)
         ).fetchone()
         if not row:
             continue
@@ -166,16 +169,18 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
 
 
 def search_hybrid(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
-                  source: str | None = None, md: bool = False, raw: bool = False,
+                  source: str | None = None, sources: tuple[str, ...] | None = None,
+                  md: bool = False, raw: bool = False,
                   full: bool = False, provider: str = "gemini",
                   chat: str | None = None, folder: str | None = None,
                   rrf_k: int = 60) -> list[Result]:
     """Hybrid search: FTS5 + embedding with RRF fusion."""
     top_k = 50
 
-    fts_results = search(query, n=top_k, db_path=db_path, source=source,
+    fts_results = search(query, n=top_k, db_path=db_path, source=source, sources=sources,
                          md=md, raw=raw, full=full, chat=chat, folder=folder)
     sem_results = search_semantic(query, n=top_k, db_path=db_path, source=source,
+                                  sources=sources,
                                   md=md, raw=raw, full=full, provider=provider,
                                   chat=chat, folder=folder)
 

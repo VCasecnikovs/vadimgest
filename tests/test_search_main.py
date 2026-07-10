@@ -148,10 +148,29 @@ class TestCmdSearch:
         cmd_search("query", n=5, source="telegram", md=False, raw=True,
                    full=True, as_json=True, chat="Dev", folder="People", db_path=db)
         mock_search.assert_called_once_with(
-            "query", n=5, db_path=db, source="telegram", md=False, raw=True,
+            "query", n=5, db_path=db, source="telegram", sources=None,
+            md=False, raw=True,
             full=True, chat="Dev", folder="People"
         )
         mock_print.assert_called_once_with([], True)
+
+    @patch("vadimgest.search.__main__._print_results")
+    @patch("vadimgest.search.__main__.search", return_value=[])
+    @patch("vadimgest.search.__main__._ensure_index")
+    def test_search_with_multiple_sources(self, mock_ensure, mock_search, mock_print, tmp_path):
+        db = tmp_path / "test.db"
+        cmd_search(
+            "query",
+            sources=("telegram", "signal", "gmail", "bee"),
+            db_path=db,
+        )
+
+        assert mock_search.call_args.kwargs["sources"] == (
+            "telegram",
+            "signal",
+            "gmail",
+            "bee",
+        )
 
 
 class TestCmdSearchVec:
@@ -185,6 +204,22 @@ class TestCmdEmbed:
     def test_rebuild_is_explicit(self, mock_index, tmp_path):
         cmd_embed("local", rebuild=True, db_path=tmp_path / "db")
         assert mock_index.call_args.kwargs["rebuild"] is True
+
+    @patch("vadimgest.search.indexer.index_embeddings", return_value={
+        "embedded": 0,
+        "skipped": 0,
+        "total": 0,
+    })
+    def test_sources_and_batch_size_are_forwarded(self, mock_index, tmp_path):
+        cmd_embed(
+            "local",
+            sources=("telegram", "signal"),
+            batch_size=64,
+            db_path=tmp_path / "db",
+        )
+
+        assert mock_index.call_args.kwargs["sources"] == ("telegram", "signal")
+        assert mock_index.call_args.kwargs["batch_size"] == 64
 
 
 # ── cmd_index ──
@@ -335,13 +370,25 @@ class TestMain:
     def test_embed_with_provider(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "embed", "--provider", "gemini"]):
             main()
-            mock_cmd.assert_called_once_with(provider="gemini", limit=None, rebuild=False)
+            mock_cmd.assert_called_once_with(
+                provider="gemini",
+                limit=None,
+                rebuild=False,
+                sources=None,
+                batch_size=10,
+            )
 
     @patch("vadimgest.search.__main__.cmd_embed")
     def test_embed_with_limit(self, mock_cmd):
         with patch("sys.argv", ["vadimgest search", "embed", "--provider", "ollama", "--limit", "100"]):
             main()
-            mock_cmd.assert_called_once_with(provider="ollama", limit=100, rebuild=False)
+            mock_cmd.assert_called_once_with(
+                provider="ollama",
+                limit=100,
+                rebuild=False,
+                sources=None,
+                batch_size=10,
+            )
 
     @patch("vadimgest.search.__main__.cmd_embed")
     def test_embed_rebuild(self, mock_cmd):
@@ -353,7 +400,34 @@ class TestMain:
             "--rebuild",
         ]):
             main()
-            mock_cmd.assert_called_once_with(provider="local", limit=None, rebuild=True)
+            mock_cmd.assert_called_once_with(
+                provider="local",
+                limit=None,
+                rebuild=True,
+                sources=None,
+                batch_size=10,
+            )
+
+    @patch("vadimgest.search.__main__.cmd_embed")
+    def test_embed_sources_and_batch_size(self, mock_cmd):
+        with patch("sys.argv", [
+            "vadimgest search",
+            "embed",
+            "--provider",
+            "local",
+            "--sources",
+            "obsidian,skills,telegram,signal,gmail,bee",
+            "--batch-size",
+            "64",
+        ]):
+            main()
+            mock_cmd.assert_called_once_with(
+                provider="local",
+                limit=None,
+                rebuild=False,
+                sources=("obsidian", "skills", "telegram", "signal", "gmail", "bee"),
+                batch_size=64,
+            )
 
     def test_embed_no_provider(self):
         with patch("sys.argv", ["vadimgest search", "embed"]):
@@ -384,6 +458,22 @@ class TestMain:
         with patch("sys.argv", ["vadimgest search", "hello", "-s", "telegram"]):
             main()
             mock_cmd.assert_called_once()
+
+    @patch("vadimgest.search.__main__.cmd_search")
+    def test_search_sources(self, mock_cmd):
+        with patch("sys.argv", [
+            "vadimgest search",
+            "hello",
+            "--sources",
+            "telegram,signal,gmail,bee",
+        ]):
+            main()
+            assert mock_cmd.call_args.kwargs["sources"] == (
+                "telegram",
+                "signal",
+                "gmail",
+                "bee",
+            )
 
     @patch("vadimgest.search.__main__.cmd_search")
     def test_search_with_all_flags(self, mock_cmd):

@@ -22,6 +22,7 @@ DEFAULT_VAULT, DEFAULT_SKILLS_DIR, DEFAULT_DB = _configured_search_paths()
 DEFAULT_JSONL_DIR = Path(__file__).parent.parent / "data" / "sources"
 
 SCHEMA_VERSION = 5  # keep at 5 - use ALTER TABLE for new columns
+DEFAULT_EMBED_SOURCES = ("obsidian", "skills")
 
 
 def get_db(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
@@ -320,7 +321,8 @@ def _content_hash(text: str) -> str:
 
 def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
                      batch_size: int = 10, limit: int | None = None,
-                     rebuild: bool = False) -> dict:
+                     rebuild: bool = False,
+                     sources: tuple[str, ...] | None = None) -> dict:
     """Generate embeddings for docs that don't have them yet.
 
     Uses content hash to skip unchanged docs. Writes to vec_docs table.
@@ -340,6 +342,14 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
     ).fetchone()
     current_space = current_row[0] if current_row else None
     vector_count = conn.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+    requested_sources = tuple(dict.fromkeys(s for s in (sources or DEFAULT_EMBED_SOURCES) if s))
+    if not requested_sources:
+        conn.close()
+        raise ValueError("at least one embedding source is required")
+    sources_row = conn.execute(
+        "SELECT value FROM vec_meta WHERE key = 'embedding_sources'"
+    ).fetchone()
+    persisted_sources = tuple(json.loads(sources_row[0])) if sources_row else ()
 
     if vector_count and current_space != desired_space:
         if not rebuild:
@@ -351,13 +361,23 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             )
         conn.execute("DELETE FROM vec_docs")
         vector_count = 0
+        persisted_sources = ()
     elif rebuild and vector_count:
         conn.execute("DELETE FROM vec_docs")
         vector_count = 0
+        persisted_sources = ()
+
+    # Corpus scope only expands during incremental runs. This prevents a legacy
+    # md-only refresh from silently deleting vectors for critical raw sources.
+    active_sources = tuple(dict.fromkeys((*persisted_sources, *requested_sources)))
 
     conn.execute(
         "INSERT OR REPLACE INTO vec_meta(key, value) VALUES ('embedding_space', ?)",
         (desired_space,),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO vec_meta(key, value) VALUES ('embedding_sources', ?)",
+        (json.dumps(active_sources),),
     )
     conn.commit()
 
@@ -369,19 +389,13 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
     except Exception:
         pass
 
-    # Embed obsidian + skills by default; extend to JSONL sources if embed_sources specified
-    # Default: obsidian + skills (small, high-signal)
-    # Extended: also hlopya, granola, signal for semantic search over meetings/conversations
-    _default_embed_sources = ('obsidian', 'skills')
-    _extended_embed_sources = ('obsidian', 'skills', 'hlopya', 'granola', 'signal', 'bee')
-    _active_sources = _extended_embed_sources if getattr(embedder, 'extended_sources', False) else _default_embed_sources
-    placeholders = ','.join('?' * len(_active_sources))
+    placeholders = ','.join('?' * len(active_sources))
     rows = conn.execute(f"""
         SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
         FROM docs JOIN meta ON docs.path = meta.path
         WHERE docs.source IN ({placeholders})
         ORDER BY docs.rowid
-    """, _active_sources).fetchall()
+    """, active_sources).fetchall()
 
     valid_vec_ids = {row[0] for row in rows}
     stale_vec_ids = existing_vec - valid_vec_ids
@@ -409,6 +423,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             "skipped": len(rows),
             "pruned": pruned,
             "embedding_space": desired_space,
+            "sources": list(active_sources),
         }
 
     embedded = 0
@@ -446,6 +461,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         "skipped": len(rows) - len(to_embed),
         "pruned": pruned,
         "embedding_space": desired_space,
+        "sources": list(active_sources),
     }
 
 
@@ -465,10 +481,22 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
             "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
         ).fetchone()
         embedding_space = row[0] if row else None
+        source_row = conn_vec.execute(
+            "SELECT value FROM vec_meta WHERE key = 'embedding_sources'"
+        ).fetchone()
+        embedding_sources = json.loads(source_row[0]) if source_row else []
+        source_counts = dict(conn_vec.execute("""
+            SELECT docs.source, COUNT(*)
+            FROM vec_docs JOIN docs ON docs.rowid = vec_docs.doc_id
+            GROUP BY docs.source
+            ORDER BY docs.source
+        """).fetchall())
         conn_vec.close()
     except Exception:
         embedded = 0
         embedding_space = None
+        embedding_sources = []
+        source_counts = {}
 
     pct = (embedded / total * 100) if total > 0 else 0
     return {
@@ -476,6 +504,8 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
         "embedded": embedded,
         "coverage": round(pct, 1),
         "embedding_space": embedding_space,
+        "embedding_sources": embedding_sources,
+        "source_counts": source_counts,
     }
 
 

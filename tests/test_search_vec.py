@@ -181,6 +181,27 @@ class TestIndexEmbeddings:
         assert r2["embedded"] == 0
         assert r2["skipped"] == 4
 
+    def test_explicit_sources_expand_corpus_without_later_pruning(self, tmp_db):
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            first = index_embeddings(db_path=tmp_db, provider="fake")
+            expanded = index_embeddings(
+                db_path=tmp_db,
+                provider="fake",
+                sources=("obsidian", "skills", "telegram"),
+            )
+            default_again = index_embeddings(db_path=tmp_db, provider="fake")
+
+        assert first["total"] == 4
+        assert expanded["total"] == 5
+        assert expanded["embedded"] == 1
+        assert expanded["sources"] == ["obsidian", "skills", "telegram"]
+        assert default_again["total"] == 5
+        assert default_again["pruned"] == 0
+
+        conn = get_vec_db(tmp_db)
+        assert conn.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0] == 5
+        conn.close()
+
     def test_prunes_vectors_for_removed_documents(self, tmp_db):
         with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
             index_embeddings(db_path=tmp_db, provider="fake")
@@ -321,6 +342,24 @@ class TestSearchSemantic:
         for r in results:
             assert "Deals" in r.folder
 
+    def test_multiple_source_filter(self, tmp_db):
+        with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+            index_embeddings(
+                db_path=tmp_db,
+                provider="fake",
+                sources=("obsidian", "skills", "telegram"),
+            )
+            results = search_semantic(
+                "robotics",
+                n=10,
+                db_path=tmp_db,
+                sources=("telegram", "obsidian"),
+                provider="fake",
+            )
+
+        assert results
+        assert {r.source for r in results} <= {"telegram", "obsidian"}
+
 
 # -- search_hybrid tests --
 
@@ -409,6 +448,16 @@ class TestFTS5Search:
         results = search("robotics", n=5, db_path=tmp_db, md=False, raw=True)
         for r in results:
             assert r.source not in ("obsidian", "skills")
+
+    def test_multiple_source_filter(self, tmp_db):
+        results = search(
+            "robotics",
+            n=10,
+            db_path=tmp_db,
+            sources=("telegram", "obsidian"),
+        )
+
+        assert {r.source for r in results} == {"telegram", "obsidian"}
 
     def test_chat_filter(self, tmp_db):
         results = search("demo", n=5, db_path=tmp_db, md=False, raw=True, chat="Team")

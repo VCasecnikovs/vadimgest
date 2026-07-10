@@ -7,6 +7,7 @@ Usage:
     vadimgest search "query" --md               # Obsidian + skills
     vadimgest search "query" --raw              # JSONL sources only
     vadimgest search "query" -s telegram        # Specific JSONL source
+    vadimgest search "query" --sources telegram,signal,gmail,bee
     vadimgest search "query" --md --raw         # Everything
     vadimgest search "query" -n 20 --full       # More results, full content
     vadimgest search "query" --json             # JSON output
@@ -26,7 +27,7 @@ Usage:
     vadimgest search stats                      # Index statistics
 
     # Embedding management
-    vadimgest search embed --provider gemini     # Generate embeddings
+    vadimgest search embed --provider local --sources obsidian,skills,telegram,signal,gmail,bee
     vadimgest search embed --provider ollama --limit 100  # First N docs
     vadimgest search embed --stats              # Embedding coverage
 """
@@ -87,33 +88,39 @@ def _print_results(results, as_json: bool = False):
 
 
 def cmd_search(query: str, n: int = 10, source: str | None = None,
+               sources: tuple[str, ...] | None = None,
                md: bool = False, raw: bool = False, full: bool = False,
                as_json: bool = False, chat: str | None = None,
                folder: str | None = None, db_path: Path = DEFAULT_DB):
     _ensure_index(db_path)
-    results = search(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+    results = search(query, n=n, db_path=db_path, source=source, sources=sources,
+                     md=md, raw=raw,
                      full=full, chat=chat, folder=folder)
     _print_results(results, as_json)
 
 
 def cmd_search_vec(query: str, n: int = 10, source: str | None = None,
+                   sources: tuple[str, ...] | None = None,
                    md: bool = False, raw: bool = False, full: bool = False,
                    as_json: bool = False, provider: str = "gemini",
                    chat: str | None = None, folder: str | None = None,
                    db_path: Path = DEFAULT_DB):
     _ensure_index(db_path)
-    results = search_semantic(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+    results = search_semantic(query, n=n, db_path=db_path, source=source, sources=sources,
+                              md=md, raw=raw,
                               full=full, provider=provider, chat=chat, folder=folder)
     _print_results(results, as_json)
 
 
 def cmd_search_hybrid(query: str, n: int = 10, source: str | None = None,
+                      sources: tuple[str, ...] | None = None,
                       md: bool = False, raw: bool = False, full: bool = False,
                       as_json: bool = False, provider: str = "gemini",
                       chat: str | None = None, folder: str | None = None,
                       db_path: Path = DEFAULT_DB):
     _ensure_index(db_path)
-    results = search_hybrid(query, n=n, db_path=db_path, source=source, md=md, raw=raw,
+    results = search_hybrid(query, n=n, db_path=db_path, source=source, sources=sources,
+                            md=md, raw=raw,
                             full=full, provider=provider, chat=chat, folder=folder)
     _print_results(results, as_json)
 
@@ -149,7 +156,8 @@ def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
 
 
 def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_DB,
-              rebuild: bool = False):
+              rebuild: bool = False, sources: tuple[str, ...] | None = None,
+              batch_size: int = 10):
     from .indexer import index_embeddings
     print(f"Embedding with {provider}...", file=sys.stderr, flush=True)
     t0 = time.time()
@@ -158,6 +166,8 @@ def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_D
         provider=provider,
         limit=limit,
         rebuild=rebuild,
+        sources=sources,
+        batch_size=batch_size,
     )
     dt = time.time() - t0
     print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
@@ -172,6 +182,10 @@ def cmd_embed_stats(db_path: Path = DEFAULT_DB):
     print(f"Embedded:   {s['embedded']}")
     print(f"Coverage:   {s['coverage']}%")
     print(f"Space:      {s.get('embedding_space') or 'unknown'}")
+    if s.get("embedding_sources"):
+        print(f"Sources:    {', '.join(s['embedding_sources'])}")
+    for source, count in s.get("source_counts", {}).items():
+        print(f"  {source:20} {count:>8}")
 
 
 def cmd_stats(db_path: Path = DEFAULT_DB):
@@ -221,6 +235,8 @@ def main():
         limit = None
         show_stats = False
         rebuild = False
+        sources = None
+        batch_size = 10
         i = 1
         while i < len(args):
             if args[i] == "--provider" and i + 1 < len(args):
@@ -235,6 +251,12 @@ def main():
             elif args[i] == "--rebuild":
                 rebuild = True
                 i += 1
+            elif args[i] == "--sources" and i + 1 < len(args):
+                sources = tuple(s.strip() for s in args[i + 1].split(",") if s.strip())
+                i += 2
+            elif args[i] == "--batch-size" and i + 1 < len(args):
+                batch_size = int(args[i + 1])
+                i += 2
             else:
                 i += 1
         if show_stats:
@@ -243,7 +265,13 @@ def main():
             print("Error: --provider required. Use: --provider local|gemini|openai|ollama")
             sys.exit(1)
         else:
-            cmd_embed(provider=provider, limit=limit, rebuild=rebuild)
+            cmd_embed(
+                provider=provider,
+                limit=limit,
+                rebuild=rebuild,
+                sources=sources,
+                batch_size=batch_size,
+            )
         return
 
     # --- Search mode ---
@@ -252,6 +280,7 @@ def main():
     full = False
     as_json = False
     source = None
+    sources = None
     md = False
     raw = False
     chat = None
@@ -267,6 +296,9 @@ def main():
             i += 2
         elif args[i] in ("-s", "--source") and i + 1 < len(args):
             source = args[i + 1]
+            i += 2
+        elif args[i] == "--sources" and i + 1 < len(args):
+            sources = tuple(s.strip() for s in args[i + 1].split(",") if s.strip())
             i += 2
         elif args[i] == "--chat" and i + 1 < len(args):
             chat = args[i + 1]
@@ -298,8 +330,8 @@ def main():
         else:
             i += 1
 
-    if not md and not raw and not source:
-        print("Specify scope: --md (obsidian+skills), --raw (jsonl), -s SOURCE, or combine --md --raw")
+    if not md and not raw and not source and not sources:
+        print("Specify scope: --md, --raw, -s SOURCE, or --sources SOURCE1,SOURCE2")
         sys.exit(1)
 
     if (vec or hybrid) and not provider:
@@ -307,13 +339,16 @@ def main():
         sys.exit(1)
 
     if hybrid:
-        cmd_search_hybrid(query, n=n, source=source, md=md, raw=raw, full=full,
+        cmd_search_hybrid(query, n=n, source=source, sources=sources,
+                          md=md, raw=raw, full=full,
                           as_json=as_json, provider=provider, chat=chat, folder=folder)
     elif vec:
-        cmd_search_vec(query, n=n, source=source, md=md, raw=raw, full=full,
+        cmd_search_vec(query, n=n, source=source, sources=sources,
+                       md=md, raw=raw, full=full,
                        as_json=as_json, provider=provider, chat=chat, folder=folder)
     else:
-        cmd_search(query, n=n, source=source, md=md, raw=raw, full=full,
+        cmd_search(query, n=n, source=source, sources=sources,
+                   md=md, raw=raw, full=full,
                    as_json=as_json, chat=chat, folder=folder)
 
 

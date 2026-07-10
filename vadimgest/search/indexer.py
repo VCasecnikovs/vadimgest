@@ -331,7 +331,8 @@ def _content_hash(text: str) -> str:
 def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
                      batch_size: int = 10, limit: int | None = None,
                      rebuild: bool = False,
-                     sources: tuple[str, ...] | None = None) -> dict:
+                     sources: tuple[str, ...] | None = None,
+                     max_batch_chars: int = 64_000) -> dict:
     """Generate embeddings for docs that don't have them yet.
 
     Uses content hash to skip unchanged docs. Writes to vec_docs table.
@@ -449,6 +450,7 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         conn.commit()
 
     batch = []
+    batch_chars = 0
     row_cursor = conn.execute(f"""
         SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
         FROM docs JOIN meta ON docs.path = meta.path
@@ -461,11 +463,14 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
             continue
         if limit is not None and selected >= limit:
             break
-        batch.append((rowid, path, source, content, h))
-        selected += 1
-        if len(batch) >= batch_size:
+        content_chars = min(len(content), 8000)
+        if batch and (len(batch) >= batch_size or batch_chars + content_chars > max_batch_chars):
             embed_batch(batch)
             batch = []
+            batch_chars = 0
+        batch.append((rowid, path, source, content, h))
+        batch_chars += content_chars
+        selected += 1
 
     if batch:
         embed_batch(batch)

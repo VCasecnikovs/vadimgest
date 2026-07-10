@@ -223,6 +223,7 @@ class TestCmdEmbed:
 
         assert mock_index.call_args.kwargs["sources"] == ("telegram", "signal")
         assert mock_index.call_args.kwargs["batch_size"] == 64
+        assert mock_index.call_args.kwargs["max_batch_chars"] == 64_000
 
 
 # ── cmd_index ──
@@ -406,6 +407,7 @@ class TestMain:
                 rebuild=False,
                 sources=None,
                 batch_size=10,
+                max_batch_chars=64_000,
             )
 
     @patch("vadimgest.search.__main__.cmd_embed")
@@ -418,6 +420,7 @@ class TestMain:
                 rebuild=False,
                 sources=None,
                 batch_size=10,
+                max_batch_chars=64_000,
             )
 
     @patch("vadimgest.search.__main__.cmd_embed")
@@ -436,6 +439,7 @@ class TestMain:
                 rebuild=True,
                 sources=None,
                 batch_size=10,
+                max_batch_chars=64_000,
             )
 
     @patch("vadimgest.search.__main__.cmd_embed")
@@ -457,6 +461,7 @@ class TestMain:
                 rebuild=False,
                 sources=("obsidian", "skills", "telegram", "signal", "gmail", "bee"),
                 batch_size=64,
+                max_batch_chars=64_000,
             )
 
     def test_embed_no_provider(self):

@@ -162,7 +162,7 @@ def cmd_index(rebuild: bool = False, exclude: set[str] | None = None,
 
 def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_DB,
               rebuild: bool = False, sources: tuple[str, ...] | None = None,
-              batch_size: int = 10):
+              batch_size: int = 10, max_batch_chars: int = 64_000):
     from .indexer import index_embeddings
     print(f"Embedding with {provider}...", file=sys.stderr, flush=True)
     t0 = time.time()
@@ -173,6 +173,7 @@ def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_D
         rebuild=rebuild,
         sources=sources,
         batch_size=batch_size,
+        max_batch_chars=max_batch_chars,
     )
     dt = time.time() - t0
     print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
@@ -251,6 +252,7 @@ def main():
         rebuild = False
         sources = None
         batch_size = 10
+        max_batch_chars = 64_000
         i = 1
         while i < len(args):
             if args[i] == "--provider" and i + 1 < len(args):
@@ -271,6 +273,9 @@ def main():
             elif args[i] == "--batch-size" and i + 1 < len(args):
                 batch_size = int(args[i + 1])
                 i += 2
+            elif args[i] == "--max-batch-chars" and i + 1 < len(args):
+                max_batch_chars = int(args[i + 1])
+                i += 2
             else:
                 i += 1
         if show_stats:
@@ -285,6 +290,7 @@ def main():
                 rebuild=rebuild,
                 sources=sources,
                 batch_size=batch_size,
+                max_batch_chars=max_batch_chars,
             )
         return
 

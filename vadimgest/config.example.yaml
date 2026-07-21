@@ -89,10 +89,13 @@ gmail:
   enabled: false
   mode: cron
   schedule: "*/15 * * * *"
-  # Requires: mcp-cli with google MCP server
+  # Requires: gog with Gmail access for every account listed below
   accounts: []
   query: "newer_than:1d -in:spam -in:trash"
   bootstrap_query: "newer_than:7d -in:spam -in:trash"
+  sent_query: "in:sent newer_than:7d"
+  sent_bootstrap_query: "in:sent newer_than:14d"
+  follow_up_hours: 48
   page_size: 25
   batch_size: 25
 

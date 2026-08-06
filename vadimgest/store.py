@@ -171,9 +171,15 @@ class DataStore:
         if not source_file.exists():
             return
         with open(source_file, "r") as f:
-            for i, raw_line in enumerate(f, 1):
-                if i >= line and raw_line.strip():
-                    yield Record.from_jsonl(raw_line)
+            logical_line = 0
+            for raw_line in f:
+                if not raw_line.strip():
+                    continue
+                logical_line += 1
+                if logical_line >= line:
+                    record = Record.from_jsonl(raw_line)
+                    record._line = logical_line
+                    yield record
 
     def read_range(self, source: str, start_line: int, end_line: int) -> Iterator[Record]:
         """Read records in [start_line, end_line] range (1-indexed, inclusive)."""
@@ -181,11 +187,17 @@ class DataStore:
         if not source_file.exists():
             return
         with open(source_file, "r") as f:
-            for i, raw_line in enumerate(f, 1):
-                if i > end_line:
+            logical_line = 0
+            for raw_line in f:
+                if not raw_line.strip():
+                    continue
+                logical_line += 1
+                if logical_line > end_line:
                     break
-                if i >= start_line and raw_line.strip():
-                    yield Record.from_jsonl(raw_line)
+                if logical_line >= start_line:
+                    record = Record.from_jsonl(raw_line)
+                    record._line = logical_line
+                    yield record
 
     def count(self, source: str) -> int:
         # Use actual file line count — state.total_records can lag when the

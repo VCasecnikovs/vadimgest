@@ -374,6 +374,22 @@ class TestReadRange:
         assert len(records) == 3
         assert records[2].data["id"] == "2"
 
+    def test_range_uses_logical_positions_when_stored_lines_are_duplicated(self, store):
+        """Regression: persisted _line drift must not stall consumers or edge uploads."""
+        store.append("src", {"id": "a"})
+        store.append("src", {"id": "b"})
+        store.append("src", {"id": "c"})
+        source_file = store.sources_dir / "src.jsonl"
+        lines = source_file.read_text().splitlines()
+        last = json.loads(lines[-1])
+        last["_line"] = 2
+        lines[-1] = json.dumps(last)
+        source_file.write_text("\n".join(lines) + "\n")
+
+        records = list(store.read_range("src", 3, 3))
+
+        assert [(record._line, record.data["id"]) for record in records] == [(3, "c")]
+
 
 # ── count ──
 

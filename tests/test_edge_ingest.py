@@ -207,6 +207,48 @@ def test_edge_agent_upload_advances_checkpoint_only_on_success(store):
     assert len(calls) == 1
 
 
+def test_edge_agent_advances_past_duplicate_stored_line_numbers(store):
+    """Regression: a duplicate Dayflow _line trapped the Mac uploader on 2026-08-06."""
+    store.append("local", {"id": "r1", "type": "document"})
+    store.append("local", {"id": "r2", "type": "document"})
+    store.append("local", {"id": "r3", "type": "document"})
+    source_file = store.sources_dir / "local.jsonl"
+    lines = source_file.read_text().splitlines()
+    last = json.loads(lines[-1])
+    last["_line"] = 2
+    lines[-1] = json.dumps(last)
+    source_file.write_text("\n".join(lines) + "\n")
+    calls = []
+
+    def transport(url, token, payload, timeout):
+        calls.append(payload)
+        if len(calls) > 1:
+            raise AssertionError("checkpoint did not advance")
+        return 200, {
+            "ok": True,
+            "accepted": len(payload["events"]),
+            "skipped": 0,
+            "errors": [],
+            "records": [{"index": i, "status": "accepted"} for i in range(len(payload["events"]))],
+        }
+
+    agent = EdgeAgent(
+        store,
+        {"enabled": True, "server_url": "https://server.test", "device_id": "mac", "batch_size": 100, "sources": ["local"]},
+        token="secret",
+        transport=transport,
+    )
+    agent.selected_sources = lambda: ["local"]
+    agent._sync_source = lambda source: (0, None)
+
+    result = agent.run_once().to_dict()
+
+    assert result["ok"] is True
+    assert result["sources"][0]["checkpoint"] == 3
+    assert result["sources"][0]["pending"] == 0
+    assert len(calls) == 1
+
+
 def test_edge_agent_persists_last_run_summary(store):
     store.append("local", {"id": "r1", "type": "document", "title": "One"})
 

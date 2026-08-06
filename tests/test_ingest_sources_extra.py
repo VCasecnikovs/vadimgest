@@ -44,7 +44,12 @@ def signal_syncer(tmp_store):
 @pytest.fixture
 def whatsapp_syncer(tmp_store):
     from vadimgest.ingest.sources.whatsapp.syncer import WhatsAppSyncer
-    return WhatsAppSyncer(tmp_store, config={"fetch_limit": 50, "chat_limit": 50})
+    return WhatsAppSyncer(tmp_store, config={
+        "fetch_limit": 50,
+        "chat_limit": 50,
+        "require_auth": False,
+        "sync_before_fetch": False,
+    })
 
 
 @pytest.fixture
@@ -506,6 +511,59 @@ class TestWhatsAppFetchNew:
         with patch("vadimgest.ingest.sources.whatsapp.syncer._wacli_call", return_value="string"):
             result = whatsapp_syncer._list_chats()
         assert result == []
+
+    def test_list_chats_normalizes_current_lowercase_schema(self, whatsapp_syncer):
+        chats = [{
+            "jid": "123@s.whatsapp.net",
+            "name": "Alice",
+            "kind": "dm",
+            "last_message_ts": "2026-08-06T10:00:00Z",
+        }]
+        with patch("vadimgest.ingest.sources.whatsapp.syncer._wacli_call", return_value=chats):
+            result = whatsapp_syncer._list_chats()
+
+        assert result == [{
+            "jid": "123@s.whatsapp.net",
+            "name": "Alice",
+            "kind": "dm",
+            "last_message_ts": "2026-08-06T10:00:00Z",
+            "JID": "123@s.whatsapp.net",
+            "Name": "Alice",
+            "Kind": "dm",
+            "LastMessageTS": "2026-08-06T10:00:00Z",
+        }]
+
+    def test_fetch_rejects_unauthenticated_wacli(self, tmp_store):
+        from vadimgest.ingest.sources.whatsapp.syncer import WhatsAppSyncer
+
+        syncer = WhatsAppSyncer(tmp_store, config={
+            "fetch_limit": 50,
+            "chat_limit": 50,
+            "require_auth": True,
+            "sync_before_fetch": True,
+        })
+        with patch(
+            "vadimgest.ingest.sources.whatsapp.syncer._wacli_call",
+            return_value={"authenticated": False},
+        ):
+            with pytest.raises(RuntimeError, match="not authenticated"):
+                list(syncer.fetch_new(SourceState()))
+
+    def test_fetch_refreshes_store_before_reading_chats(self, tmp_store):
+        from vadimgest.ingest.sources.whatsapp.syncer import WhatsAppSyncer
+
+        syncer = WhatsAppSyncer(tmp_store, config={
+            "fetch_limit": 50,
+            "chat_limit": 50,
+            "require_auth": True,
+            "sync_before_fetch": True,
+        })
+        with patch.object(syncer, "_require_authenticated_store"), \
+             patch.object(syncer, "_sync_store") as sync_store, \
+             patch.object(syncer, "_list_chats", return_value=[]):
+            assert list(syncer.fetch_new(SourceState())) == []
+
+        sync_store.assert_called_once_with()
 
     def test_list_messages_error(self, whatsapp_syncer):
         with patch("vadimgest.ingest.sources.whatsapp.syncer._wacli_call",

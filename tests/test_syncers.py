@@ -72,7 +72,12 @@ def github_syncer(tmp_store):
 def whatsapp_syncer(tmp_store):
     """WhatsApp syncer with test config."""
     from vadimgest.ingest.sources.whatsapp.syncer import WhatsAppSyncer
-    return WhatsAppSyncer(tmp_store, config={"fetch_limit": 50, "chat_limit": 50})
+    return WhatsAppSyncer(tmp_store, config={
+        "fetch_limit": 50,
+        "chat_limit": 50,
+        "require_auth": False,
+        "sync_before_fetch": False,
+    })
 
 
 @pytest.fixture

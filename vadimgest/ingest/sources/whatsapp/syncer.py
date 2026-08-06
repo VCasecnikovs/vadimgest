@@ -61,6 +61,9 @@ class WhatsAppSyncer(CronSyncer):
     config_schema = {
         "chat_limit": {"type": "int", "default": 50, "description": "Maximum number of chats to scan per sync", "min": 1, "max": 1000, "placeholder": "50"},
         "fetch_limit": {"type": "int", "default": 50, "description": "Maximum messages to fetch per chat", "min": 1, "max": 10000, "placeholder": "50"},
+        "require_auth": {"type": "bool", "default": True, "description": "Fail the source when wacli is not authenticated"},
+        "sync_before_fetch": {"type": "bool", "default": True, "description": "Refresh the wacli store before reading messages"},
+        "sync_idle_exit_seconds": {"type": "int", "default": 10, "description": "Seconds wacli must be idle before sync exits", "min": 1, "max": 120},
     }
 
     def __init__(self, store: DataStore, config: dict | None = None):
@@ -69,10 +72,32 @@ class WhatsAppSyncer(CronSyncer):
 
         self.fetch_limit = config.get("fetch_limit", 50)
         self.chat_limit = config.get("chat_limit", 50)
+        self.require_auth = config.get("require_auth", True)
+        self.sync_before_fetch = config.get("sync_before_fetch", True)
+        self.sync_idle_exit_seconds = config.get("sync_idle_exit_seconds", 10)
 
         # JID aliases: map LID JIDs -> canonical phone JIDs
         # Merges split conversations from WhatsApp's LID migration
         self.jid_aliases: dict[str, str] = config.get("jid_aliases", {})
+
+    def _require_authenticated_store(self) -> None:
+        data = _wacli_call(["auth", "status"], timeout=10)
+        if not isinstance(data, dict) or not data.get("authenticated", False):
+            raise RuntimeError("wacli is not authenticated; run `wacli auth`")
+
+    def _sync_store(self) -> None:
+        cmd = [
+            "wacli",
+            "sync",
+            "--once",
+            "--idle-exit",
+            f"{self.sync_idle_exit_seconds}s",
+            "--json",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode != 0:
+            error = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            raise RuntimeError(f"wacli sync failed: {error}")
 
     def _list_chats(self) -> list[dict]:
         """Fetch active chats sorted by last activity."""
@@ -85,8 +110,22 @@ class WhatsAppSyncer(CronSyncer):
         if not data:
             return []
 
-        # data is a list of {"JID": ..., "Kind": "dm|group", "Name": ..., "LastMessageTS": ...}
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            return []
+
+        # wacli 0.2 emits lowercase chat keys; older versions used title case.
+        normalized = []
+        for chat in data:
+            if not isinstance(chat, dict):
+                continue
+            normalized.append({
+                **chat,
+                "JID": chat.get("JID") or chat.get("jid", ""),
+                "Kind": chat.get("Kind") or chat.get("kind", ""),
+                "Name": chat.get("Name") or chat.get("name", ""),
+                "LastMessageTS": chat.get("LastMessageTS") or chat.get("last_message_ts", ""),
+            })
+        return normalized
 
     def _list_messages(self, chat_jid: str, after: str | None = None) -> list[dict]:
         """Fetch messages from a chat, return normalized list of dicts."""
@@ -231,6 +270,11 @@ class WhatsAppSyncer(CronSyncer):
         Handles JID aliases: when a contact has both a LID and phone JID,
         messages from both are merged under the canonical (phone) JID.
         """
+        if self.require_auth:
+            self._require_authenticated_store()
+        if self.sync_before_fetch:
+            self._sync_store()
+
         self.log("Fetching chat list...")
         chats = self._list_chats()
 

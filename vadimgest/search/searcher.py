@@ -140,6 +140,31 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
 
     src_sql, src_params = _source_filter_sql(source, sources, md, raw)
     has_filter = bool(source or sources or md or raw or chat or folder)
+    filters = src_sql.replace("source", "d.source")
+    params = [*src_params]
+    if chat or folder:
+        conn_vec.create_function("unicode_lower", 1, lambda value: (value or "").lower())
+    if chat:
+        filters += " AND instr(unicode_lower(d.chat), ?)"
+        params.append(chat.lower())
+    if folder:
+        filters += " AND instr(unicode_lower(d.folder), ?)"
+        params.append(folder.lower())
+    if has_filter:
+        # A small conversation cannot fill a large hybrid candidate request.
+        # Stop at its real document count instead of forcing a full vector scan.
+        eligible = conn_vec.execute(f"""
+            SELECT 1 FROM vec_passages root
+            CROSS JOIN docs d ON d.rowid = root.vector_id AND d.path = root.path
+            JOIN meta m ON m.path = root.path
+            WHERE root.vector_id > 0 AND m.content_hash = root.content_hash {filters}
+            LIMIT ?
+        """, (*params, n)).fetchall()
+        n = len(eligible)
+        if not n:
+            conn_vec.close()
+            conn_fts.close()
+            return []
     fetch_n = min(vector_count, 4096, max(n * 5, 1000 if has_filter else n))
     results = []
     seen = set()
@@ -153,15 +178,6 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
         if fetch_n == 4096:
             # sqlite-vec caps KNN at 4096. Exact grouping is the rare fallback
             # when long documents or metadata filters consume that candidate pool.
-            filters = src_sql.replace("source", "d.source")
-            params = [*src_params]
-            conn_vec.create_function("unicode_lower", 1, lambda value: (value or "").lower())
-            if chat:
-                filters += " AND instr(unicode_lower(d.chat), ?)"
-                params.append(chat.lower())
-            if folder:
-                filters += " AND instr(unicode_lower(d.folder), ?)"
-                params.append(folder.lower())
             rows = conn_vec.execute(f"""
                 SELECT p.vector_id, MIN(vec_distance_L2(v.embedding, ?)) AS distance
                 FROM vec_docs v JOIN vec_passages p ON p.vector_id = v.doc_id

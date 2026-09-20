@@ -407,8 +407,23 @@ def test_many_passages_do_not_exhaust_distinct_document_results(tmp_db):
         conn.execute("INSERT INTO vec_passages VALUES (?, ?, 0, ?, ?)", (vector_id, path, len(content), _content_hash(content)))
         vector = emb.embed_one("needle" if index < 4099 else "other")
         conn.execute("INSERT INTO vec_docs VALUES (?, ?)", (vector_id, Embedder.serialize(vector)))
+    conn.execute("UPDATE docs SET chat = 'Only scope' WHERE rowid = ?", (paths[0][0],))
     conn.commit()
     conn.close()
+    statements = []
+    original_get_vec_db = get_vec_db
+
+    def traced_db(path):
+        connection = original_get_vec_db(path)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    with patch("vadimgest.search.embedder.get_embedder", return_value=emb), patch(
+        "vadimgest.search.searcher.get_vec_db", side_effect=traced_db
+    ):
+        scoped = search_semantic("needle", n=50, db_path=tmp_db, provider="fake", chat="only scope")
+    assert [hit.path for hit in scoped] == [paths[0][1]]
+    assert not any("MIN(vec_distance_L2" in statement for statement in statements)
     with patch("vadimgest.search.embedder.get_embedder", return_value=emb):
         hits = search_semantic("needle", n=2, db_path=tmp_db, provider="fake")
     assert [hit.path for hit in hits] == [p[1] for p in paths]

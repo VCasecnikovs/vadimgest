@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import signal
+import re
+import shlex
+import subprocess
 import socket
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -94,7 +98,45 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _ssh_transport(url: str, token: str, payload: dict[str, Any], timeout: int) -> tuple[int, dict[str, Any]]:
+    """Use an existing SSH host alias when the private HTTP route is unavailable."""
+    endpoint = urllib.parse.urlsplit(url)
+    host = endpoint.hostname or ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", host) or endpoint.username or endpoint.password:
+        raise EdgeAgentError("ssh edge URL must use an existing SSH host alias without credentials")
+    remote_url = f"http://127.0.0.1:{endpoint.port or 8484}{endpoint.path}"
+    script = """import json, sys, urllib.request, urllib.error
+item = json.load(sys.stdin)
+request = urllib.request.Request(item['url'], data=json.dumps(item['payload']).encode(),
+    headers={'Authorization': 'Bearer ' + item['token'], 'Content-Type': 'application/json'}, method='POST')
+try:
+    response = urllib.request.urlopen(request, timeout=item['timeout'])
+except urllib.error.HTTPError as error:
+    response = error
+with response:
+    raw = response.read().decode()
+    try:
+        body = json.loads(raw or '{}')
+    except ValueError:
+        body = {'ok': False, 'error': raw[:1000]}
+    print(json.dumps({'status': response.status, 'body': body}))
+"""
+    result = subprocess.run(
+        ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host,
+         "python3 -c " + shlex.quote(script)],
+        input=json.dumps({"url": remote_url, "token": token, "payload": payload, "timeout": timeout},
+                         ensure_ascii=False, default=str),
+        capture_output=True, text=True, timeout=timeout + 15,
+    )
+    if result.returncode:
+        raise EdgeAgentError(f"SSH upload failed: {result.stderr.strip()[:1000]}")
+    reply = json.loads(result.stdout)
+    return int(reply["status"]), reply["body"]
+
+
 def _default_transport(url: str, token: str, payload: dict[str, Any], timeout: int) -> tuple[int, dict[str, Any]]:
+    if url.startswith("ssh://"):
+        return _ssh_transport(url, token, payload, timeout)
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     req = urllib.request.Request(
         url,

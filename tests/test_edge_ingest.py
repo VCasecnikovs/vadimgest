@@ -381,3 +381,32 @@ def test_edge_autostart_launchd_is_separate_from_dashboard_services(tmp_path, mo
     assert "com.vadimgest.daemon" not in text
     assert autostart.is_edge_installed() is True
     assert autostart.is_installed() is False
+
+
+def test_ssh_edge_transport_keeps_credentials_off_command_line(monkeypatch):
+    from types import SimpleNamespace
+    from vadimgest.edge_agent import _default_transport, EdgeAgentError
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return SimpleNamespace(returncode=0, stdout='{"status": 207, "body": {"accepted": 1, "skipped": 0}}', stderr="")
+
+    monkeypatch.setattr("vadimgest.edge_agent.subprocess.run", run)
+    status, data = _default_transport("ssh://bakeneko:8484/api/edge/events/batch", "test-secret", {"events": [{"text": "private"}]}, 30)
+    assert status == 207 and data["accepted"] == 1
+    assert "test-secret" not in " ".join(captured["command"])
+    request = json.loads(captured["input"])
+    assert request["token"] == "test-secret"
+    assert request["url"] == "http://127.0.0.1:8484/api/edge/events/batch"
+    assert captured["timeout"] == 45
+    with pytest.raises(EdgeAgentError, match="host alias"):
+        _default_transport("ssh://-oProxyCommand=bad:8484/api/edge/events/batch", "test-secret", {}, 30)
+
+
+def test_ssh_edge_transport_reports_failure(monkeypatch):
+    from types import SimpleNamespace
+    from vadimgest.edge_agent import _default_transport, EdgeAgentError
+    monkeypatch.setattr("vadimgest.edge_agent.subprocess.run", lambda *a, **k: SimpleNamespace(returncode=255, stdout="", stderr="Connection refused"))
+    with pytest.raises(EdgeAgentError, match="Connection refused"):
+        _default_transport("ssh://bakeneko:8484/api/edge/events/batch", "test-secret", {}, 30)

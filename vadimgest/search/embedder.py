@@ -18,6 +18,18 @@ class Embedder(ABC):
     def embed_one(self, text: str, task: str = "document") -> list[float]:
         return self.embed([text], task=task)[0]
 
+    def space(self, provider: str) -> str:
+        model = getattr(self, "_MODEL", None) or getattr(self, "model", None) or self.__class__.__name__
+        return f"{provider}:{model}:{self.dim}"
+
+    def passages(self, text: str):
+        """Overlapping spans for providers without a local tokenizer."""
+        for start in range(0, max(1, len(text)), 1080):
+            end = min(start + 1200, len(text))
+            yield start, end
+            if end == len(text):
+                break
+
     @staticmethod
     def serialize(vec: list[float]) -> bytes:
         """Pack float list to BLOB for sqlite-vec."""
@@ -141,7 +153,10 @@ class OllamaEmbedder(Embedder):
 
 
 class LocalEmbedder(Embedder):
-    """Local BGE embeddings through fastembed, with no API key."""
+    """Local embeddings; VADIMGEST_LOCAL_MODEL selects a compatible 768-dim model.
+
+    Changing models requires --rebuild and the same selection for every reader.
+    """
 
     _MODEL = "BAAI/bge-base-en-v1.5"
     _QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -149,14 +164,47 @@ class LocalEmbedder(Embedder):
     def __init__(self):
         from fastembed import TextEmbedding
 
+        self._MODEL = os.environ.get("VADIMGEST_LOCAL_MODEL", self._MODEL)
         self._model = TextEmbedding(model_name=self._MODEL)
+        if self._model.embedding_size != self.dim:
+            raise ValueError(f"Local model must output {self.dim} dimensions")
+        from copy import deepcopy
+        self._tokenizer = deepcopy(self._model.model.tokenizer)
+        # Short overlapping passages retain individual facts; MPNet was trained
+        # with a 128-token sentence limit, including special tokens.
+        self._max_tokens = min(126, self._tokenizer.truncation["max_length"] - 2)
+        self._tokenizer.no_truncation()
+        self._tokenizer.no_padding()
+
+    def passages(self, text: str):
+        offsets = self._tokenizer.encode(text, add_special_tokens=False).offsets
+        if not offsets:
+            yield 0, len(text)
+            return
+        overlap = min(48, self._max_tokens // 4)
+        i = 0
+        while i < len(offsets):
+            last = min(i + self._max_tokens, len(offsets))
+            start = offsets[i][0] if i else 0
+            end = offsets[last - 1][1] if last < len(offsets) else len(text)
+            # A slice beginning inside a word can retokenize to more tokens.
+            while last > i + 1 and len(self._tokenizer.encode(text[start:end], add_special_tokens=False).ids) > self._max_tokens:
+                last -= 1
+                end = offsets[last - 1][1]
+            yield start, end
+            if last == len(offsets):
+                break
+            i = max(i + 1, last - overlap)
 
     def embed(self, texts: list[str], task: str = "document") -> list[list[float]]:
-        if task == "query":
+        if task == "query" and self._MODEL.startswith("BAAI/bge-base-en"):
             texts = [self._QUERY_PREFIX + text for text in texts]
-        else:
-            texts = [text[:4000] for text in texts]
-        return [vector.tolist() for vector in self._model.embed(texts)]
+        vectors = [vector.tolist() for vector in self._model.embed(texts)]
+        # sqlite-vec uses L2 distance; normalize models that return unnormalized vectors.
+        for vector in vectors:
+            norm = sum(v * v for v in vector) ** 0.5 or 1.0
+            vector[:] = [value / norm for value in vector]
+        return vectors
 
 
 PROVIDERS = {

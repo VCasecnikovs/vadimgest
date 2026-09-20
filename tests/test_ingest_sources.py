@@ -12,7 +12,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -538,6 +538,57 @@ class TestTelegramTranscribeVoice:
 
 class TestTelegramFetchNew:
     """Tests for TelegramSyncer.fetch_new."""
+
+    @pytest.mark.parametrize("is_user,is_group,is_bot,is_self,outgoing,chat_type", [
+        (True, False, False, False, False, "private"),
+        (True, False, False, False, True, "private"),
+        (True, False, True, False, False, "private"),
+        (True, False, False, True, True, "private"),
+        (False, True, False, False, False, "group"),
+        (False, False, False, False, False, "channel"),
+    ])
+    def test_async_fetch_preserves_only_private_counterparty_contact_metadata(
+        self, telegram_syncer, is_user, is_group, is_bot, is_self, outgoing, chat_type,
+    ):
+        me = SimpleNamespace(id=1, first_name="Me", username="own_name", phone="111111")
+        entity = me if is_self else SimpleNamespace(
+            id=2, first_name="Contact", bot=is_bot, username="contact_name", phone="222222",
+        )
+        dialog = SimpleNamespace(entity=entity, is_user=is_user, is_group=is_group, date=None, name="Chat")
+        sender = me if outgoing else entity
+        message = SimpleNamespace(
+            id=10, message="Hello", media=None, sender=sender, sender_id=sender.id,
+            date=datetime.now(timezone.utc),
+        )
+
+        async def dialogs():
+            yield dialog
+
+        async def messages(*args, **kwargs):
+            yield message
+
+        client = SimpleNamespace(
+            connect=AsyncMock(), disconnect=AsyncMock(), is_user_authorized=AsyncMock(return_value=True),
+            get_me=AsyncMock(return_value=me), iter_dialogs=dialogs, iter_messages=messages,
+        )
+        telegram_syncer.config["include_chat_ids"] = [entity.id]
+        with patch.object(telegram_syncer, "_ensure_sqlite_session", new_callable=AsyncMock, return_value=False), \
+             patch.object(telegram_syncer, "_get_client", return_value=client):
+            records = asyncio.run(telegram_syncer._async_fetch(SourceState(), 100))
+
+        assert len(records) == 1
+        meta = records[0]["meta"]
+        assert meta["chat_type"] == chat_type
+        assert meta["chat_is_bot"] is is_bot
+        assert meta["chat_id"] == entity.id
+        assert meta["sender_id"] == sender.id
+        if is_user and not is_bot and not is_self:
+            assert meta["chat_username"] == "contact_name"
+            assert meta["chat_phone"] == "222222"
+        else:
+            assert "chat_username" not in meta
+            assert "chat_phone" not in meta
+        assert "111111" not in json.dumps(meta)
 
     def test_fetch_new_yields_records(self, telegram_syncer):
         mock_records = [{"id": "1_1", "text": "hello"}]

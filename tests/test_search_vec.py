@@ -17,7 +17,6 @@ from vadimgest.search.indexer import (
     embed_stats,
     _content_hash,
     _extract_jsonl_text,
-    _embedding_text,
 )
 from vadimgest.search.searcher import search, search_semantic, search_hybrid, Result
 from vadimgest.search.embedder import Embedder, GeminiEmbedder, get_embedder
@@ -46,18 +45,12 @@ def test_email_metadata_remains_searchable_without_body():
     assert "gmail_account_message-123" in text
 
 
-def test_raw_embedding_text_keeps_both_ends_with_bounded_size():
-    content = "START" + ("x" * 5000) + "END"
-    embedded = _embedding_text("signal", content)
-
-    assert embedded.startswith("START")
-    assert embedded.endswith("END")
-    assert len(embedded) <= 1600
-
-
-def test_obsidian_embedding_text_keeps_longer_context():
-    content = "x" * 5000
-    assert _embedding_text("obsidian", content) == content
+def test_passages_cover_long_records_with_overlap():
+    text = "START" + "x" * 5000 + "END"
+    spans = list(FakeEmbedder().passages(text))
+    assert spans[0][0] == 0 and spans[-1][1] == len(text)
+    assert all(end - start <= 1200 for start, end in spans)
+    assert all(b[0] < a[1] for a, b in zip(spans, spans[1:]))
 
 @pytest.fixture
 def tmp_db(tmp_path):
@@ -318,6 +311,96 @@ class TestIndexEmbeddings:
 
         # Only the changed doc should be re-embedded
         assert result["embedded"] == 1
+
+
+def test_passage_search_preserves_path_and_returns_middle_evidence(tmp_db):
+    class TopicEmbedder(FakeEmbedder):
+        def embed(self, texts, task="document"):
+            return [[float("secret commitment" in text), float("secret commitment" not in text)] + [0.0] * 766 for text in texts]
+
+    content = "routine status " * 300 + "secret commitment: ship by Tuesday. " + "other routine work " * 300
+    conn = get_db(tmp_db)
+    conn.execute("UPDATE docs SET content = ? WHERE path = 'telegram:42'", (content,))
+    conn.commit()
+    conn.close()
+    with patch("vadimgest.search.embedder.get_embedder", return_value=TopicEmbedder()):
+        result = index_embeddings(db_path=tmp_db, provider="fake", sources=("telegram",))
+        hits = search_semantic("secret commitment", n=10, db_path=tmp_db, source="telegram", provider="fake")
+        assert result["passages"] > result["embedded"] == 1
+        assert len(hits) == 1 and hits[0].path == "telegram:42"
+        assert "secret commitment" in hits[0].snippet
+        assert len(hits[0].snippet) < len(content)
+        full = search_semantic("secret commitment", n=1, db_path=tmp_db, provider="fake", full=True)
+        assert full[0].snippet == content
+        assert index_embeddings(db_path=tmp_db, provider="fake", sources=("telegram",))["embedded"] == 0
+    stats = embed_stats(tmp_db)
+    assert stats["embedded"] == 1 and stats["passages"] > 1
+    conn = get_vec_db(tmp_db)
+    # An old reader still resolves positive vector ids to the right canonical document.
+    assert conn.execute("SELECT d.path FROM vec_docs v JOIN docs d ON d.rowid = v.doc_id").fetchall() == [("telegram:42",)]
+    conn.close()
+    conn = get_db(tmp_db)
+    conn.execute("DELETE FROM docs WHERE path = 'telegram:42'")
+    conn.commit()
+    conn.close()
+    with patch("vadimgest.search.embedder.get_embedder", return_value=TopicEmbedder()):
+        assert search_semantic("secret commitment", db_path=tmp_db, provider="fake") == []
+        assert index_embeddings(db_path=tmp_db, provider="fake", sources=("telegram",))["pruned"] == stats["passages"]
+
+
+def test_legacy_vectors_remain_searchable_during_incremental_migration(tmp_db):
+    conn = get_vec_db(tmp_db)
+    conn.execute("DROP TABLE vec_passages")
+    for rowid, content in conn.execute("SELECT rowid, content FROM docs WHERE source = 'obsidian'").fetchall():
+        conn.execute("INSERT INTO vec_docs VALUES (?, ?)", (rowid, Embedder.serialize(FakeEmbedder().embed_one(content))))
+    conn.execute("INSERT INTO vec_meta VALUES ('embedding_space', 'fake:FakeEmbedder:768')")
+    conn.execute("INSERT INTO vec_meta VALUES ('embedding_sources', ?)", ('["obsidian"]',))
+    conn.commit()
+    conn.close()
+    with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+        assert len(search_semantic("robotics", n=10, db_path=tmp_db, provider="fake")) == 3
+        result = index_embeddings(db_path=tmp_db, provider="fake", sources=("obsidian",), limit=1)
+        assert result["embedded"] == 1
+        assert len(search_semantic("robotics", n=10, db_path=tmp_db, provider="fake")) == 3
+        assert index_embeddings(db_path=tmp_db, provider="fake", sources=("obsidian",))["embedded"] == 2
+        with pytest.raises(RuntimeError, match="embedding space"):
+            search_semantic("robotics", db_path=tmp_db, provider="different")
+
+
+def test_failed_passage_batch_preserves_previous_vectors(tmp_db):
+    with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
+        index_embeddings(db_path=tmp_db, provider="fake")
+    conn = get_vec_db(tmp_db)
+    before = conn.execute("SELECT * FROM vec_docs").fetchall()
+    conn.execute("UPDATE meta SET content_hash = NULL WHERE path LIKE 'obsidian:%'")
+    conn.commit()
+    conn.close()
+    broken = FakeEmbedder()
+    broken.embed = lambda texts: [[0.0] * 768 for _ in texts]
+    with patch("vadimgest.search.embedder.get_embedder", return_value=broken):
+        with pytest.raises(RuntimeError, match="invalid vector"):
+            index_embeddings(db_path=tmp_db, provider="fake")
+    conn = get_vec_db(tmp_db)
+    assert conn.execute("SELECT * FROM vec_docs").fetchall() == before
+    conn.close()
+
+
+def test_many_passages_do_not_exhaust_distinct_document_results(tmp_db):
+    conn = get_vec_db(tmp_db)
+    paths = conn.execute("SELECT rowid, path, content FROM docs WHERE source = 'obsidian' LIMIT 2").fetchall()
+    emb = FakeEmbedder()
+    conn.execute("INSERT INTO vec_meta VALUES ('embedding_space', 'fake:FakeEmbedder:768')")
+    for index in range(4100):
+        rowid, path, content = paths[0 if index < 4099 else 1]
+        vector_id = -index - 1
+        conn.execute("INSERT INTO vec_passages VALUES (?, ?, 0, ?, ?)", (vector_id, path, len(content), _content_hash(content)))
+        vector = emb.embed_one("needle" if index < 4099 else "other")
+        conn.execute("INSERT INTO vec_docs VALUES (?, ?)", (vector_id, Embedder.serialize(vector)))
+    conn.commit()
+    conn.close()
+    with patch("vadimgest.search.embedder.get_embedder", return_value=emb):
+        hits = search_semantic("needle", n=2, db_path=tmp_db, provider="fake")
+    assert [hit.path for hit in hits] == [p[1] for p in paths]
 
 
 # -- embed_stats tests --

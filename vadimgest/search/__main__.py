@@ -186,6 +186,7 @@ def cmd_embed(provider: str, limit: int | None = None, db_path: Path = DEFAULT_D
     )
     dt = time.time() - t0
     print(f"Done in {dt:.1f}s: embedded={result['embedded']}, "
+          f"passages={result.get('passages', result['embedded'])}, "
           f"skipped={result['skipped']}, pruned={result.get('pruned', 0)}, "
           f"total={result['total']}")
 
@@ -195,6 +196,7 @@ def cmd_embed_stats(db_path: Path = DEFAULT_DB):
     s = embed_stats(db_path)
     print(f"Total docs: {s['total_docs']}")
     print(f"Embedded:   {s['embedded']}")
+    print(f"Passages:   {s.get('passages', s['embedded'])}")
     print(f"Coverage:   {s['coverage']}%")
     print(f"Space:      {s.get('embedding_space') or 'unknown'}")
     if s.get("embedding_sources"):

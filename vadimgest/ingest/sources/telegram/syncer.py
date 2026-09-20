@@ -460,6 +460,16 @@ class TelegramSyncer(CronSyncer):
 
             matched += 1
             last_msg_id = per_chat.get(chat_id, {}).get("last_message_id")
+            chat_meta = {
+                "chat_id": int(chat_id),
+                "chat_type": "private" if dialog.is_user else "group" if dialog.is_group else "channel",
+                "chat_is_bot": bool(getattr(dialog.entity, "bot", False)),
+            }
+            if dialog.is_user and not chat_meta["chat_is_bot"] and dialog.entity.id != me.id:
+                for field in ("username", "phone"):
+                    value = getattr(dialog.entity, field, None)
+                    if value:
+                        chat_meta[f"chat_{field}"] = value
 
             try:
                 kwargs = {"limit": min(limit, 200), "reverse": True}
@@ -494,7 +504,7 @@ class TelegramSyncer(CronSyncer):
                     sender_name = self._entity_name(msg.sender)
 
                     meta = {
-                        "chat_id": int(chat_id),
+                        **chat_meta,
                         "message_id": msg.id,
                         "sender_id": msg.sender_id,
                     }

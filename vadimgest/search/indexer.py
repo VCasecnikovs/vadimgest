@@ -107,6 +107,30 @@ def get_vec_db(db_path: Path = DEFAULT_DB):
             embedding float[768]
         )
     """)
+    # Positive ids retain docs.rowid for old readers; negative ids hold extra passages.
+    has_passages = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'vec_passages'"
+    ).fetchone()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS vec_passages(
+            vector_id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            start INTEGER NOT NULL,
+            end INTEGER NOT NULL,
+            content_hash TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS vec_passages_path ON vec_passages(path)")
+    if not has_passages and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'docs'"
+    ).fetchone():
+        conn.execute("""
+            INSERT INTO vec_passages
+            SELECT v.doc_id, d.path, 0, MIN(LENGTH(d.content), 200), m.content_hash
+            FROM vec_docs v JOIN docs d ON d.rowid = v.doc_id
+            JOIN meta m ON m.path = d.path
+        """)
+        conn.execute("DELETE FROM vec_docs WHERE doc_id NOT IN (SELECT vector_id FROM vec_passages)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS vec_meta(
             key TEXT PRIMARY KEY,
@@ -332,14 +356,6 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def _embedding_text(source: str, content: str) -> str:
-    """Keep raw semantic batches compact while retaining both ends of a record."""
-    if source in DEFAULT_EMBED_SOURCES or len(content) <= 1600:
-        return content[:8000]
-    half = 797
-    return f"{content[:half]}\n...\n{content[-half:]}"
-
-
 def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
                      batch_size: int = 10, limit: int | None = None,
                      rebuild: bool = False,
@@ -351,14 +367,14 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
     """
     from .embedder import get_embedder, Embedder
 
+    if batch_size < 1 or max_batch_chars < 1 or (limit is not None and limit < 0):
+        raise ValueError("batch_size/max_batch_chars must be positive; limit must be nonnegative")
     embedder = get_embedder(provider)
 
     # Use single pysqlite3 connection for everything (avoids WAL lock conflicts)
     conn = get_vec_db(db_path)
 
-    model = getattr(embedder, "_MODEL", None) or getattr(embedder, "model", None)
-    model = model or embedder.__class__.__name__
-    desired_space = f"{provider}:{model}:{embedder.dim}"
+    desired_space = embedder.space(provider)
     current_row = conn.execute(
         "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
     ).fetchone()
@@ -382,10 +398,12 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
                 "Re-run with rebuild=True / --rebuild to replace all vectors."
             )
         conn.execute("DELETE FROM vec_docs")
+        conn.execute("DELETE FROM vec_passages")
         vector_count = 0
         persisted_sources = ()
     elif rebuild and vector_count:
         conn.execute("DELETE FROM vec_docs")
+        conn.execute("DELETE FROM vec_passages")
         vector_count = 0
         persisted_sources = ()
 
@@ -403,96 +421,114 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
     )
     conn.commit()
 
-    # Get existing embeddings
-    existing_vec = set()
-    try:
-        for row in conn.execute("SELECT doc_id FROM vec_docs"):
-            existing_vec.add(row[0])
-    except Exception:
-        pass
-
     placeholders = ','.join('?' * len(active_sources))
     total = conn.execute(
-        f"SELECT COUNT(*) FROM docs WHERE source IN ({placeholders})",
-        active_sources,
+        f"SELECT COUNT(*) FROM docs WHERE source IN ({placeholders})", active_sources,
     ).fetchone()[0]
-    valid_vec_ids = {
-        row[0]
-        for row in conn.execute(
-            f"SELECT rowid FROM docs WHERE source IN ({placeholders})",
-            active_sources,
-        )
-    }
-    stale_vec_ids = existing_vec - valid_vec_ids
-    for doc_id in stale_vec_ids:
-        conn.execute("DELETE FROM vec_docs WHERE doc_id = ?", (doc_id,))
-    if stale_vec_ids:
-        conn.commit()
-        existing_vec -= stale_vec_ids
-    pruned = len(stale_vec_ids)
+    stale = conn.execute(f"""
+        SELECT p.vector_id FROM vec_passages p
+        LEFT JOIN docs d ON d.path = p.path
+        WHERE d.path IS NULL OR d.source NOT IN ({placeholders})
+    """, active_sources).fetchall()
+    conn.executemany("DELETE FROM vec_docs WHERE doc_id = ?", stale)
+    conn.executemany("DELETE FROM vec_passages WHERE vector_id = ?", stale)
+    conn.commit()
+    pruned = len(stale)
+    existing_paths = {r[0] for r in conn.execute("SELECT DISTINCT path FROM vec_passages")}
 
     embedded = 0
     selected = 0
 
+    passages_embedded = 0
+    next_passage_id = min(0, conn.execute("SELECT MIN(vector_id) FROM vec_passages").fetchone()[0] or 0) - 1
+
     def embed_batch(batch: list[tuple]) -> None:
-        nonlocal embedded
-        texts = [_embedding_text(item[2], item[3]) for item in batch]
+        nonlocal embedded, passages_embedded, next_passage_id
+        passages = [
+            (rowid if i == 0 else None, path, h, start, end, content[start:end])
+            for rowid, path, content, h, spans in batch for i, (start, end) in enumerate(spans)
+        ]
+        vectors = []
+        pending = []
+        pending_chars = 0
 
-        try:
-            vectors = embedder.embed(texts)
-        except Exception as e:
-            print(f"  Embedding error after {embedded} docs: {e}", file=sys.stderr)
-            return
+        def flush() -> None:
+            if not pending:
+                return
+            result = embedder.embed(pending)
+            if len(result) != len(pending):
+                raise RuntimeError("embedding provider returned an incomplete batch")
+            import math
+            for vector in result:
+                if len(vector) != embedder.dim or not all(map(math.isfinite, vector)) or not any(vector):
+                    raise RuntimeError("embedding provider returned an invalid vector")
+            vectors.extend(result)
+            pending.clear()
 
-        for (rowid, path, source, content, h), vec in zip(batch, vectors):
-            blob = Embedder.serialize(vec)
-            conn.execute("DELETE FROM vec_docs WHERE doc_id = ?", (rowid,))
-            conn.execute(
-                "INSERT INTO vec_docs(doc_id, embedding) VALUES (?, ?)",
-                (rowid, blob)
-            )
-            conn.execute(
-                "UPDATE meta SET content_hash = ? WHERE path = ?", (h, path)
-            )
+        for *_, text in passages:
+            if pending and (len(pending) >= batch_size or pending_chars + len(text) > max_batch_chars):
+                flush()
+                pending_chars = 0
+            pending.append(text)
+            pending_chars += len(text)
+        flush()
 
+        # Replace complete documents only after all their passages embedded successfully.
+        with conn:
+            for _, path, content, h, spans in batch:
+                conn.execute("DELETE FROM vec_docs WHERE doc_id IN (SELECT vector_id FROM vec_passages WHERE path = ?)", (path,))
+                conn.execute("DELETE FROM vec_passages WHERE path = ?", (path,))
+            for (vector_id, path, h, start, end, _), vec in zip(passages, vectors):
+                if vector_id is None:
+                    vector_id = next_passage_id
+                    next_passage_id -= 1
+                conn.execute(
+                    "INSERT INTO vec_passages(vector_id, path, start, end, content_hash) VALUES (?, ?, ?, ?, ?)",
+                    (vector_id, path, start, end, h),
+                )
+                conn.execute("INSERT INTO vec_docs(doc_id, embedding) VALUES (?, ?)",
+                             (vector_id, Embedder.serialize(vec)))
+            conn.executemany("UPDATE meta SET content_hash = ? WHERE path = ?",
+                             [(h, path) for _, path, _, h, _ in batch])
         embedded += len(batch)
-        if embedded % 200 == 0:
-            print(f"  Embedded {embedded}...", file=sys.stderr, flush=True)
-
-        conn.commit()
+        passages_embedded += len(passages)
+        if embedded % 200 < len(batch) or len(passages) >= 200:
+            print(f"  Embedded {embedded} docs / {passages_embedded} passages...", file=sys.stderr, flush=True)
 
     batch = []
     batch_chars = 0
     row_cursor = conn.execute(f"""
-        SELECT docs.rowid, docs.path, docs.source, docs.content, meta.content_hash
+        SELECT docs.rowid, docs.path, docs.content, meta.content_hash
         FROM docs JOIN meta ON docs.path = meta.path
         WHERE docs.source IN ({placeholders})
         ORDER BY docs.rowid
     """, active_sources)
-    for rowid, path, source, content, old_hash in row_cursor:
-        h = _content_hash(content)
-        if rowid in existing_vec and old_hash == h:
+    for rowid, path, content, old_hash in row_cursor:
+        h = _content_hash("passages-v1:" + content)
+        if path in existing_paths and old_hash == h:
             continue
         if limit is not None and selected >= limit:
             break
-        content_chars = len(_embedding_text(source, content))
+        spans = list(embedder.passages(content))
+        content_chars = sum(end - start for start, end in spans)
         if batch and (len(batch) >= batch_size or batch_chars + content_chars > max_batch_chars):
             embed_batch(batch)
             batch = []
             batch_chars = 0
-        batch.append((rowid, path, source, content, h))
+        batch.append((rowid, path, content, h, spans))
         batch_chars += content_chars
         selected += 1
 
     if batch:
         embed_batch(batch)
     if embedded and embedded % 200:
-        print(f"  Embedded {embedded}/{selected}...", file=sys.stderr, flush=True)
+        print(f"  Embedded {embedded}/{selected} docs / {passages_embedded} passages...", file=sys.stderr, flush=True)
 
     conn.close()
     return {
         "total": total,
         "embedded": embedded,
+        "passages": passages_embedded,
         "skipped": total - selected,
         "pruned": pruned,
         "embedding_space": desired_space,
@@ -511,7 +547,8 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
 
     try:
         conn_vec = get_vec_db(db_path)
-        embedded = conn_vec.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+        passages = conn_vec.execute("SELECT COUNT(*) FROM vec_docs").fetchone()[0]
+        embedded = conn_vec.execute("SELECT COUNT(DISTINCT path) FROM vec_passages").fetchone()[0]
         row = conn_vec.execute(
             "SELECT value FROM vec_meta WHERE key = 'embedding_space'"
         ).fetchone()
@@ -521,14 +558,14 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
         ).fetchone()
         embedding_sources = json.loads(source_row[0]) if source_row else []
         source_counts = dict(conn_vec.execute("""
-            SELECT docs.source, COUNT(*)
-            FROM vec_docs JOIN docs ON docs.rowid = vec_docs.doc_id
+            SELECT docs.source, COUNT(DISTINCT docs.path)
+            FROM vec_passages JOIN docs USING(path)
             GROUP BY docs.source
             ORDER BY docs.source
         """).fetchall())
         conn_vec.close()
     except Exception:
-        embedded = 0
+        embedded = passages = 0
         embedding_space = None
         embedding_sources = []
         source_counts = {}
@@ -538,6 +575,7 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
         "total_docs": total,
         "embedded": embedded,
         "coverage": round(pct, 1),
+        "passages": passages,
         "embedding_space": embedding_space,
         "embedding_sources": embedding_sources,
         "source_counts": source_counts,

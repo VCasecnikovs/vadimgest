@@ -117,6 +117,8 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
     """Pure embedding-based semantic search."""
     from .embedder import get_embedder, Embedder
 
+    if n <= 0 or not db_path.exists():
+        return []
     embedder = get_embedder(provider)
     query_vec = embedder.embed_one(query, task="query")
     query_blob = Embedder.serialize(query_vec)
@@ -130,38 +132,76 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
         conn_fts.close()
         return []
 
-    # sqlite-vec applies KNN before metadata filters, so filtered searches need
-    # enough candidates to avoid losing a smaller source inside a large corpus.
-    has_filter = bool(source or sources or md or raw or chat or folder)
-    fetch_n = min(vector_count, max(n * 5, 1000 if has_filter else n))
-    rows = conn_vec.execute(
-        "SELECT doc_id, distance FROM vec_docs WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (query_blob, fetch_n)
-    ).fetchall()
+    space_row = conn_vec.execute("SELECT value FROM vec_meta WHERE key = 'embedding_space'").fetchone()
+    if not space_row or space_row[0] != embedder.space(provider):
+        conn_vec.close()
+        conn_fts.close()
+        raise RuntimeError("embedding space mismatch: use the indexed provider/model or rebuild the index")
 
-    # Build source filter for post-filtering
     src_sql, src_params = _source_filter_sql(source, sources, md, raw)
-
+    has_filter = bool(source or sources or md or raw or chat or folder)
+    fetch_n = min(vector_count, 4096, max(n * 5, 1000 if has_filter else n))
     results = []
-    for doc_id, distance in rows:
-        if len(results) >= n:
+    seen = set()
+    checked = set()
+    # Expand until enough distinct matching documents survive passage deduplication.
+    while len(results) < n:
+        rows = conn_vec.execute(
+            "SELECT doc_id, distance FROM vec_docs WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (query_blob, fetch_n),
+        ).fetchall()
+        if fetch_n == 4096:
+            # sqlite-vec caps KNN at 4096. Exact grouping is the rare fallback
+            # when long documents or metadata filters consume that candidate pool.
+            filters = src_sql.replace("source", "d.source")
+            params = [*src_params]
+            conn_vec.create_function("unicode_lower", 1, lambda value: (value or "").lower())
+            if chat:
+                filters += " AND instr(unicode_lower(d.chat), ?)"
+                params.append(chat.lower())
+            if folder:
+                filters += " AND instr(unicode_lower(d.folder), ?)"
+                params.append(folder.lower())
+            rows = conn_vec.execute(f"""
+                SELECT p.vector_id, MIN(vec_distance_L2(v.embedding, ?)) AS distance
+                FROM vec_docs v JOIN vec_passages p ON p.vector_id = v.doc_id
+                JOIN docs d ON d.path = p.path JOIN meta m ON m.path = p.path
+                WHERE m.content_hash = p.content_hash {filters}
+                GROUP BY p.path ORDER BY distance LIMIT ?
+            """, (query_blob, *params, n)).fetchall()
+        for vector_id, distance in rows:
+            if vector_id in checked:
+                continue
+            checked.add(vector_id)
+            passage = conn_vec.execute(
+                "SELECT path, start, end, content_hash FROM vec_passages WHERE vector_id = ?",
+                (vector_id,),
+            ).fetchone()
+            if not passage or passage[0] in seen:
+                continue
+            row = conn_fts.execute(
+                f"""SELECT d.path, d.source, d.title, d.content, d.chat, d.folder
+                FROM docs d JOIN meta m ON d.path = m.path
+                WHERE d.path = ? AND m.content_hash = ? {src_sql.replace('source', 'd.source')}""",
+                (passage[0], passage[3], *src_params),
+            ).fetchone()
+            if not row:
+                continue
+            if chat and chat.lower() not in (row[4] or "").lower():
+                continue
+            if folder and folder.lower() not in (row[5] or "").lower():
+                continue
+            snippet = row[3] if full else row[3][passage[1]:passage[2]]
+            results.append(Result(
+                path=row[0], source=row[1], title=row[2], snippet=snippet,
+                rank=distance, chat=row[4] or "", folder=row[5] or "",
+            ))
+            seen.add(row[0])
+            if len(results) >= n:
+                break
+        if fetch_n >= vector_count or fetch_n == 4096:
             break
-        row = conn_fts.execute(
-            f"SELECT path, source, title, content, chat, folder FROM docs WHERE rowid = ? {src_sql}",
-            (doc_id, *src_params)
-        ).fetchone()
-        if not row:
-            continue
-        # Metadata filters
-        if chat and chat.lower() not in (row[4] or "").lower():
-            continue
-        if folder and folder.lower() not in (row[5] or "").lower():
-            continue
-        snippet = row[3][:200] if not full else row[3]
-        results.append(Result(
-            path=row[0], source=row[1], title=row[2], snippet=snippet,
-            rank=distance, chat=row[4] or "", folder=row[5] or ""
-        ))
+        fetch_n = min(vector_count, 4096, fetch_n * 2)
 
     conn_vec.close()
     conn_fts.close()

@@ -348,14 +348,25 @@ def test_passage_search_preserves_path_and_returns_middle_evidence(tmp_db):
         assert index_embeddings(db_path=tmp_db, provider="fake", sources=("telegram",))["pruned"] == stats["passages"]
 
 
-def test_legacy_vectors_remain_searchable_during_incremental_migration(tmp_db):
+@pytest.mark.parametrize("interrupted_bootstrap", [False, True])
+def test_legacy_vectors_remain_searchable_during_incremental_migration(tmp_db, interrupted_bootstrap):
     conn = get_vec_db(tmp_db)
-    conn.execute("DROP TABLE vec_passages")
+    if not interrupted_bootstrap:
+        conn.execute("DROP TABLE vec_passages")
     for rowid, content in conn.execute("SELECT rowid, content FROM docs WHERE source = 'obsidian'").fetchall():
         conn.execute("INSERT INTO vec_docs VALUES (?, ?)", (rowid, Embedder.serialize(FakeEmbedder().embed_one(content))))
     conn.execute("INSERT INTO vec_meta VALUES ('embedding_space', 'fake:FakeEmbedder:768')")
     conn.execute("INSERT INTO vec_meta VALUES ('embedding_sources', ?)", ('["obsidian"]',))
     conn.commit()
+    conn.close()
+    conn = sqlite3.connect(str(tmp_db))
+    statements = []
+    conn.set_trace_callback(statements.append)
+    with patch("vadimgest.search.indexer.sqlite3.connect", return_value=conn):
+        get_vec_db(tmp_db)
+    bootstrap = next(s for s in statements if "INSERT INTO vec_passages" in s)
+    plan = conn.execute("EXPLAIN QUERY PLAN " + bootstrap).fetchall()
+    assert any("SCAN d VIRTUAL TABLE INDEX 0:=" in row[3] for row in plan)
     conn.close()
     with patch("vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()):
         assert len(search_semantic("robotics", n=10, db_path=tmp_db, provider="fake")) == 3

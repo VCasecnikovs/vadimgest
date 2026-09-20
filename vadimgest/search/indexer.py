@@ -108,9 +108,6 @@ def get_vec_db(db_path: Path = DEFAULT_DB):
         )
     """)
     # Positive ids retain docs.rowid for old readers; negative ids hold extra passages.
-    has_passages = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE name = 'vec_passages'"
-    ).fetchone()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS vec_passages(
             vector_id INTEGER PRIMARY KEY,
@@ -121,13 +118,15 @@ def get_vec_db(db_path: Path = DEFAULT_DB):
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS vec_passages_path ON vec_passages(path)")
-    if not has_passages and conn.execute(
+    # An interrupted first migration may have created the table before committing
+    # its mappings. Retry that empty-table state without replacing live passages.
+    if not conn.execute("SELECT 1 FROM vec_passages LIMIT 1").fetchone() and conn.execute(
         "SELECT 1 FROM sqlite_master WHERE name = 'docs'"
     ).fetchone():
         conn.execute("""
             INSERT INTO vec_passages
             SELECT v.doc_id, d.path, 0, MIN(LENGTH(d.content), 200), m.content_hash
-            FROM vec_docs v JOIN docs d ON d.rowid = v.doc_id
+            FROM vec_docs v CROSS JOIN docs d ON d.rowid = v.doc_id
             JOIN meta m ON m.path = d.path
         """)
         conn.execute("DELETE FROM vec_docs WHERE doc_id NOT IN (SELECT vector_id FROM vec_passages)")

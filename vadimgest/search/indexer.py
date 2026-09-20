@@ -426,9 +426,12 @@ def index_embeddings(db_path: Path = DEFAULT_DB, provider: str = "gemini",
         f"SELECT COUNT(*) FROM docs WHERE source IN ({placeholders})", active_sources,
     ).fetchone()[0]
     stale = conn.execute(f"""
-        SELECT p.vector_id FROM vec_passages p
-        LEFT JOIN docs d ON d.path = p.path
-        WHERE d.path IS NULL OR d.source NOT IN ({placeholders})
+        SELECT p.vector_id FROM vec_passages p WHERE p.path IN (
+            SELECT root.path FROM vec_passages root
+            LEFT JOIN docs d ON d.rowid = root.vector_id
+            WHERE root.vector_id > 0
+              AND (d.path IS NULL OR d.path != root.path OR d.source NOT IN ({placeholders}))
+        )
     """, active_sources).fetchall()
     conn.executemany("DELETE FROM vec_docs WHERE doc_id = ?", stale)
     conn.executemany("DELETE FROM vec_passages WHERE vector_id = ?", stale)
@@ -558,10 +561,10 @@ def embed_stats(db_path: Path = DEFAULT_DB) -> dict:
         ).fetchone()
         embedding_sources = json.loads(source_row[0]) if source_row else []
         source_counts = dict(conn_vec.execute("""
-            SELECT docs.source, COUNT(DISTINCT docs.path)
-            FROM vec_passages JOIN docs USING(path)
-            GROUP BY docs.source
-            ORDER BY docs.source
+            SELECT meta.source, COUNT(DISTINCT meta.path)
+            FROM vec_passages JOIN meta USING(path)
+            GROUP BY meta.source
+            ORDER BY meta.source
         """).fetchall())
         conn_vec.close()
     except Exception:

@@ -392,7 +392,7 @@ def test_many_passages_do_not_exhaust_distinct_document_results(tmp_db):
     conn.execute("INSERT INTO vec_meta VALUES ('embedding_space', 'fake:FakeEmbedder:768')")
     for index in range(4100):
         rowid, path, content = paths[0 if index < 4099 else 1]
-        vector_id = -index - 1
+        vector_id = rowid if index in (0, 4099) else -index - 1
         conn.execute("INSERT INTO vec_passages VALUES (?, ?, 0, ?, ?)", (vector_id, path, len(content), _content_hash(content)))
         vector = emb.embed_one("needle" if index < 4099 else "other")
         conn.execute("INSERT INTO vec_docs VALUES (?, ?)", (vector_id, Embedder.serialize(vector)))
@@ -629,3 +629,19 @@ class TestGeminiIntegration:
         # The robotics-related docs should rank high
         titles = [r.title.lower() for r in results]
         assert any("robot" in t or "alice" in t for t in titles)
+
+
+def test_pruning_uses_fts_rowid_lookup_instead_of_repeated_full_scan(tmp_db):
+    conn = get_vec_db(tmp_db)
+    statements = []
+    conn.set_trace_callback(statements.append)
+    with patch("vadimgest.search.indexer.get_vec_db", return_value=conn), patch(
+        "vadimgest.search.embedder.get_embedder", return_value=FakeEmbedder()
+    ):
+        index_embeddings(db_path=tmp_db, provider="fake")
+    query = next(s for s in statements if "SELECT p.vector_id FROM vec_passages p WHERE p.path IN" in s)
+    conn = get_vec_db(tmp_db)
+    plan = conn.execute("EXPLAIN QUERY PLAN " + query).fetchall()
+    conn.close()
+    fts_steps = [row[3] for row in plan if "VIRTUAL TABLE INDEX" in row[3]]
+    assert fts_steps and all(":=" in detail for detail in fts_steps)

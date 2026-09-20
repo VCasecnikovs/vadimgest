@@ -165,7 +165,9 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
             rows = conn_vec.execute(f"""
                 SELECT p.vector_id, MIN(vec_distance_L2(v.embedding, ?)) AS distance
                 FROM vec_docs v JOIN vec_passages p ON p.vector_id = v.doc_id
-                JOIN docs d ON d.path = p.path JOIN meta m ON m.path = p.path
+                JOIN vec_passages root ON root.path = p.path AND root.vector_id > 0
+                JOIN docs d ON d.rowid = root.vector_id AND d.path = p.path
+                JOIN meta m ON m.path = p.path
                 WHERE m.content_hash = p.content_hash {filters}
                 GROUP BY p.path ORDER BY distance LIMIT ?
             """, (query_blob, *params, n)).fetchall()
@@ -181,8 +183,10 @@ def search_semantic(query: str, n: int = 10, db_path: Path = DEFAULT_DB,
                 continue
             row = conn_fts.execute(
                 f"""SELECT d.path, d.source, d.title, d.content, d.chat, d.folder
-                FROM docs d JOIN meta m ON d.path = m.path
-                WHERE d.path = ? AND m.content_hash = ? {src_sql.replace('source', 'd.source')}""",
+                FROM vec_passages root JOIN docs d ON d.rowid = root.vector_id
+                JOIN meta m ON m.path = root.path
+                WHERE root.path = ? AND root.vector_id > 0 AND d.path = root.path
+                  AND m.content_hash = ? {src_sql.replace('source', 'd.source')}""",
                 (passage[0], passage[3], *src_params),
             ).fetchone()
             if not row:
